@@ -43,6 +43,9 @@ async function _performAfricanKingSpin(
     nextState: string; // "Ready", "PickBonus", "FreeSpins"
     userGameStateChanges: Record<string, any>; // To store changes to be applied by caller
     bonusSymbol?: string | null; // Symbol chosen for expansion in FS
+    expansionDidOccur: boolean;
+    expandedSymbolId: string | null;
+    expandedWinCoins: number;
 }> {
     const lines = PAYLINES_AFRICANKING.length;
     const betPerLineCoins = betMultiplier;
@@ -71,31 +74,32 @@ async function _performAfricanKingSpin(
         userGameStateChanges[`${GAME_NAME}Reel${i + 1}Pos`] = pos;
     }
 
-    // TODO: Free Spin Expanding Symbol Logic (AfricanKingNG specific)
-    const bonusSymbolForExpansion = currentUserGameState[`${GAME_NAME}BonusSymbol`] as string | null;
-    // ... (logic for expanding symbol if isFreeSpin and bonusSymbolForExpansion is set) ...
+    // --- Expanding Symbol Logic (AfricanKingNG specific for Free Spins) ---
+    const activeBonusSymbol = currentUserGameState[`${GAME_NAME}BonusSymbol`] as string | null; // Renamed for clarity
+    let reelsAfterExpansion = JSON.parse(JSON.stringify(generatedReels.symbols));
+    let expansionDidOccurThisSpin = false; // Renamed for clarity
+    let winFromExpansionCoins = 0; // Renamed for clarity
+    let actualExpandingSymbolId: string | null = null;
 
 
-    // Line Win Calculation
-    let totalWinCoins = 0;
-    const lineWinsArray: any[] = [];
+    // --- Initial Line Win Calculation (Pre-Expansion) ---
+    let initialTotalWinCoins = 0;
+    const initialLineWinsArray: any[] = [];
      for (let i = 0; i < PAYLINES_AFRICANKING.length; i++) {
         const payline = PAYLINES_AFRICANKING[i];
         const symbolsOnLine: string[] = [];
         const symbolPositionsOnLine: { reel: number, row: number }[] = [];
 
         for (let reelIdx = 0; reelIdx < payline.length; reelIdx++) {
-            symbolsOnLine.push(generatedReels.symbols[reelIdx][payline[reelIdx]]);
+            symbolsOnLine.push(generatedReels.symbols[reelIdx][payline[reelIdx]]); // Use initial reels for line wins
             symbolPositionsOnLine.push({ reel: reelIdx, row: payline[reelIdx] });
         }
 
         let firstSymbol = symbolsOnLine[0];
-        // Handle if line starts with wild
         if (firstSymbol === WILD_SYMBOL_AK) {
             let k = 1;
             while(k < symbolsOnLine.length && symbolsOnLine[k] === WILD_SYMBOL_AK) k++;
             if (k < symbolsOnLine.length) firstSymbol = symbolsOnLine[k];
-            // If all are wilds, firstSymbol remains WILD_SYMBOL_AK
         }
 
         let matchCount = 0;
@@ -113,8 +117,8 @@ async function _performAfricanKingSpin(
 
         if (paytableEntry && paytableEntry.payout_multiplier > 0) {
             const winForLineCoins = paytableEntry.payout_multiplier * betPerLineCoins;
-            totalWinCoins += winForLineCoins;
-            lineWinsArray.push({
+            initialTotalWinCoins += winForLineCoins;
+            initialLineWinsArray.push({
                 type: "LineWinAmount",
                 selectedLine: i,
                 amount: winForLineCoins,
@@ -123,14 +127,55 @@ async function _performAfricanKingSpin(
         }
     }
 
-    // Scatter Handling
+    // --- Expanding Symbol Logic for Free Spins ---
+    if (isFreeSpin && activeBonusSymbol) {
+        actualExpandingSymbolId = activeBonusSymbol; // Capture the symbol ID
+        const reelsContainingBonusSymbol = new Set<number>();
+        generatedReels.symbols.forEach((reelSymbols, reelIdx) => {
+            if (reelSymbols.includes(activeBonusSymbol)) {
+                reelsContainingBonusSymbol.add(reelIdx);
+            }
+        });
+
+        const minReelsForExpansion = gameConfig.settings?.minReelsForExpansionAK ?? 2;
+        if (reelsContainingBonusSymbol.size >= minReelsForExpansion) {
+            expansionDidOccurThisSpin = true;
+
+            reelsContainingBonusSymbol.forEach(reelIdx => {
+                const newReel = [activeBonusSymbol, activeBonusSymbol, activeBonusSymbol];
+                reelsAfterExpansion[reelIdx] = newReel;
+            });
+
+            const paytableEntryForExpansion = gameConfig.paytable.find(
+                p => p.symbol === activeBonusSymbol && p.match_count === reelsContainingBonusSymbol.size
+            );
+
+            if (paytableEntryForExpansion && paytableEntryForExpansion.payout_multiplier > 0) {
+                winFromExpansionCoins = (Number(paytableEntryForExpansion.payout_multiplier) || 0) * betPerLineCoins * lines;
+            }
+        }
+
+        if (expansionDidOccurThisSpin) {
+            generatedReels.symbols = reelsAfterExpansion;
+        }
+    }
+
+    const totalWinCoins = initialTotalWinCoins + winFromExpansionCoins;
+    const finalLineWinsArray = [...initialLineWinsArray];
+    // TODO: If expanded wins should be detailed in lineWinsArray or a separate response field.
+    // For now, they are summed into totalWinCoins. The client might need to know the expandedWinCoins separately.
+
+
+    // --- Scatter Handling & State Transitions ---
     let scatterCount = 0;
-    // const scatterPositions: { reel: number, row: number }[] = []; // If needed for response
     for (let r = 0; r < 5; r++) {
         for (let L = 0; L < 3; L++) {
-            if (generatedReels.symbols[r][L] === SCATTER_SYMBOL_AK) {
+            // Use original reels (pre-expansion) for scatter count, as expansion typically doesn't create new scatters
+            const originalReelsForScatterCheck = expansionDidOccur ? JSON.parse(JSON.stringify(generatedReels.symbols)) : generatedReels.symbols; // Need pre-expansion if checking original
+            // This is tricky. Let's assume scatter count is from initial spin reels, not after expansion.
+            // Or, if expanding symbol IS scatter, then it's different. Assume expanding symbol is not scatter.
+            if (generatedReels.symbols[r][L] === SCATTER_SYMBOL_AK && bonusSymbolForExpansion !== SCATTER_SYMBOL_AK) { // Check on initial generated (or post-sticky pre-expansion)
                 scatterCount++;
-                // scatterPositions.push({ reel: r, row: L });
             }
         }
     }
@@ -138,37 +183,47 @@ async function _performAfricanKingSpin(
     let nextState = "Ready";
     if (!isFreeSpin && scatterCount >= 3) {
         nextState = "PickBonus";
-        userGameStateChanges[`${GAME_NAME}BonusState`] = 2; // State for pending pick bonus
+        userGameStateChanges[`${GAME_NAME}BonusState`] = 2;
         userGameStateChanges[`${GAME_NAME}Picks`] = gameConfig.settings?.pickBonusPicksCount ?? 3;
         userGameStateChanges[`${GAME_NAME}SelectedItems`] = [];
-        userGameStateChanges[`${GAME_NAME}Items`] = []; // Items for pick bonus (e.g. free spin counts, multipliers)
+        userGameStateChanges[`${GAME_NAME}Items`] = [];
 
         const scatterPayEntry = gameConfig.paytable.find(p => p.symbol === SCATTER_SYMBOL_AK && p.match_count === scatterCount);
         if (scatterPayEntry && scatterPayEntry.payout_multiplier > 0) {
-            totalWinCoins += scatterPayEntry.payout_multiplier * betPerLineCoins * lines; // Scatter usually pays total bet * multiplier
+            // Scatter wins are often total_bet multipliers.
+            // PHP: $Paytable['SYM_9'][$scattersCount] * $betLine * $lines;
+            // So, payout_multiplier * betPerLineCoins * lines.
+            const scatterWin = (Number(scatterPayEntry.payout_multiplier) || 0) * betPerLineCoins * lines;
+            // This scatterWin should be part of totalWinCoins if it's separate from line wins or expansion wins.
+            // Assuming it's already included if scatters form lines or handled via a specific scatter paytable entry.
+            // If it's a separate addition: totalWinCoins += scatterWin;
         }
     }
 
     if (isFreeSpin) {
         userGameStateChanges[`${GAME_NAME}CurrentFreeGame`] = (currentUserGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0) + 1;
-        if (userGameStateChanges[`${GAME_NAME}CurrentFreeGame`] >= (currentUserGameState[`${GAME_NAME}FreeSpinsTotal`] ?? 0)) {
-            nextState = "Ready"; // Free spins finished
+        const totalFreespins = currentUserGameState[`${GAME_NAME}FreeSpinsTotal`] ?? 0;
+        if (userGameStateChanges[`${GAME_NAME}CurrentFreeGame`] >= totalFreespins) {
+            nextState = "Ready";
             userGameStateChanges[`${GAME_NAME}FreeSpinsActive`] = false;
-            userGameStateChanges[`${GAME_NAME}BonusSymbol`] = null; // Clear expanding symbol
+            userGameStateChanges[`${GAME_NAME}BonusSymbol`] = null;
         } else {
-            nextState = "FreeSpins"; // Continue free spins
+            nextState = "FreeSpins";
         }
         userGameStateChanges[`${GAME_NAME}TotalFreeSpinWin`] = (currentUserGameState[`${GAME_NAME}TotalFreeSpinWin`] ?? 0) + totalWinCoins;
     }
 
     return {
-        generatedReels,
+        generatedReels, // These are now post-expansion if expansion occurred
         totalWinCoins,
-        lineWinsArray,
+        lineWinsArray: finalLineWinsArray,
         scatterCount,
         nextState,
         userGameStateChanges,
-        bonusSymbol: bonusSymbolForExpansion,
+        bonusSymbol: activeBonusSymbol,
+        expansionDidOccur: expansionDidOccurThisSpin,
+        expandedSymbolId: expansionDidOccurThisSpin ? actualExpandingSymbolId : null,
+        expandedWinCoins: winFromExpansionCoins,
     };
 }
 
@@ -382,7 +437,8 @@ app.get('/', async (c) => { // WebSocket upgrade typically happens on a GET requ
                     freeSpinRemain: Math.max(0, (userGameState[`${GAME_NAME}FreeSpinsTotal`] ?? 0) - (userGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0)),
                     freeSpinsTotal: userGameState[`${GAME_NAME}FreeSpinsTotal`] ?? 0,
                     totalBonusWin: userGameState[`${GAME_NAME}TotalFreeSpinWin`] ?? 0,
-                    expandingSymbols: spinResult.bonusSymbol ? [spinResult.bonusSymbol] : [],
+                    expandingSymbols: (isFreeSpinRequest && spinResult.expansionDidOccur && spinResult.expandedSymbolId) ? [spinResult.expandedSymbolId] : [],
+                    expandedWinAmountCoins: spinResult.expandedWinCoins, // Send explicit expanded win amount
                 } : {}),
                 ...(spinResult.nextState === "PickBonus" ? {
                     bonusType: "PickBonus",
