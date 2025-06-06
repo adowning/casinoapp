@@ -5,447 +5,262 @@ import { GameConfigService, FullGameConfig } from '../../services/GameConfigServ
 import { UserGameStateService } from '../../services/UserGameStateService';
 import { BankService } from '../../services/BankService';
 import { LogService, GameSpinLogData } from '../../services/LogService';
-import { User } from '@prisma/client'; // Import User type
+import { User } from '@prisma/client';
 
 const GAME_NAME = 'CreatureFromTheBlackLagoonNET';
 
-// Paylines for Creature From The Black Lagoon (20 lines)
-// Based on common NetEnt 20-line structure. Verify if specific to this game from PHP.
-// Each inner array represents [reel0_row, reel1_row, reel2_row, reel3_row, reel4_row] (0-indexed rows)
+const WILD_SYMBOL_CFTBL = 'SYM_1';
+const SCATTER_SYMBOL_CFTBL = 'SYM_0';
+const TARGET_SYMBOL_CFTBL = 'SYM_2';
+
 const PAYLINES: number[][] = [
-    [1, 1, 1, 1, 1], // Line 1 (middle row)
-    [0, 0, 0, 0, 0], // Line 2 (top row)
-    [2, 2, 2, 2, 2], // Line 3 (bottom row)
-    [0, 1, 2, 1, 0], // Line 4 (V shape)
-    [2, 1, 0, 1, 2], // Line 5 (Inverse V shape)
-    [0, 0, 1, 2, 2], // Line 6
-    [2, 2, 1, 0, 0], // Line 7
-    [1, 0, 0, 0, 1], // Line 8
-    [1, 2, 2, 2, 1], // Line 9
-    [1, 0, 1, 2, 1], // Line 10
-    [1, 2, 1, 0, 1], // Line 11
-    [0, 1, 0, 1, 0], // Line 12
-    [2, 1, 2, 1, 2], // Line 13
-    [0, 1, 1, 1, 0], // Line 14
-    [2, 1, 1, 1, 2], // Line 15
-    [1, 1, 0, 1, 1], // Line 16
-    [1, 1, 2, 1, 1], // Line 17
-    [0, 0, 2, 0, 0], // Line 18
-    [2, 2, 0, 2, 2], // Line 19
-    [0, 2, 0, 2, 0], // Line 20
+    [1,1,1,1,1],[0,0,0,0,0],[2,2,2,2,2],[0,1,2,1,0],[2,1,0,1,2],
+    [0,0,1,2,2],[2,2,1,0,0],[1,0,0,0,1],[1,2,2,2,1],[1,0,1,2,1],
+    [1,2,1,0,1],[0,1,1,1,0],[2,1,1,1,2],[1,1,0,1,1],[1,1,2,1,1],
+    [0,1,2,1,2],[2,1,0,1,0],[1,0,2,0,1],[1,2,0,2,1],[0,2,2,2,0]
 ];
 
 // --- Shared Spin Logic ---
 async function _performSpinLogic(
-    c: Context,
     userId: number,
-    user: User, // Pass the fetched user object
     gameConfig: FullGameConfig,
-    userGameState: Record<string, any>,
+    currentUserGameState: Record<string, any>,
     betLevel: number,
-    denom: number, // Denomination in currency units (e.g., 0.01)
+    denom: number,
     isFreeSpin: boolean,
-    isRespin: boolean // TODO: Implement respin specific logic (sticky wilds)
-): Promise<Context | Response> {
-    const lines = 20; // Fixed for Creature From The Black Lagoon
-    const betAmountCoins = betLevel * lines; // Bet amount in coins for this spin
-    const betAmountCurrency = isFreeSpin ? 0 : betAmountCoins * denom;
+    isRespin: boolean
+): Promise<{
+    userGameStateChanges: Record<string, any>;
+    // Data for response construction:
+    finalReelSymbols: string[][]; // symbols on screen after all features
+    finalReelPositions: number[]; // stop positions for these reels
+    totalWinCoins: number;
+    lineWins: any[]; // Formatted for response
+    scatterCount: number;
+    nextAction: string;
+    gameIsOver: boolean;
+    currentStickyWildsResult: { reel: number, row: number, symbol: string }[];
+    monsterHealthResult: number;
+    featureStageResult: number;
+    freeSpinsAwardedThisSpinResult: number;
+    freeSpinsLeftResult: number;
+    freeSpinsTotalResult: number;
+    currentFreeGameResult: number;
+    bonusWinCoinsResult: number;
+}> {
+    const lines = PAYLINES.length;
+    const betPerLineCoins = betLevel;
+    const userGameStateChanges: Record<string, any> = {};
 
-    // Log entry for this spin
-    const spinLogEntry: Partial<GameSpinLogData> = {
-        userId,
-        gameId: gameConfig.id,
-        gameName: GAME_NAME,
-        shopId: user.shop_id ?? undefined,
-        betAmount: betAmountCurrency,
-        winAmount: 0, // Will be updated
-        ipAddress: c.req.header('x-forwarded-for') || c.req.header('remote-addr'),
-        denomination: denom,
-        userBalanceAfterSpin: user.balance ?? 0, // Initial, will be updated
-    };
+    let currentStickyWilds: { reel: number, row: number, symbol: string }[] =
+        (isFreeSpin || isRespin) ? (currentUserGameState[`${GAME_NAME}StickyWilds`] || []) : [];
 
-    // 3. Get Spin Settings (Simplified: random outcome for now)
-    // TODO: Port PHP GetSpinSettings logic (determines if win, bonus, or none based on RTP etc.)
-    // For now, every spin is a "normal" spin, outcome determined by reels.
-
-    // 4. Generate Reel Strips
     const generatedReels: { symbols: string[][], positions: number[] } = { symbols: [], positions: [] };
-    const finalReelPositions: Record<string, number> = {};
-
-    for (let i = 0; i < 5; i++) { // 5 reels
-        const reelStripKey = isFreeSpin ? `reelStripBonus${i + 1}` : `reelStrip${i + 1}`; // Or more complex logic for free spin strips
-        const strip = gameConfig.reel_strips[reelStripKey] || gameConfig.reel_strips[`reelStrip${i + 1}`] || [];
-
+    for (let i = 0; i < 5; i++) {
+        const reelStripKey = isFreeSpin ?
+            (gameConfig.reel_strips[`reelStripBonus${i + 1}`] ? `reelStripBonus${i + 1}` : `reelStrip${i + 1}`)
+            : `reelStrip${i + 1}`;
+        const strip = gameConfig.reel_strips[reelStripKey] || ['SYM_X','SYM_X','SYM_X'];
         if (strip.length < 3) {
-            console.error(`[${GAME_NAME}] Reel strip ${reelStripKey} is too short! Length: ${strip.length}`);
-            // Fallback to a default strip if a specific one is missing or too short
-            generatedReels.symbols.push(['SYM_0', 'SYM_0', 'SYM_0']);
+            generatedReels.symbols.push(['SYM_X', 'SYM_X', 'SYM_X']);
             generatedReels.positions.push(0);
-            finalReelPositions[`${GAME_NAME}Reel${i+1}Pos`] = 0;
             continue;
         }
-
-        const pos = Math.floor(Math.random() * (strip.length - 2)); // Ensure we can get 3 symbols
+        const pos = Math.floor(Math.random() * (strip.length - 2 < 0 ? 0 : strip.length - 2));
         generatedReels.symbols.push([strip[pos], strip[pos + 1], strip[pos + 2]]);
         generatedReels.positions.push(pos);
-        finalReelPositions[`${GAME_NAME}Reel${i+1}Pos`] = pos; // For UserGameState
     }
-    // TODO: Implement sticky wild logic for respins/freespins:
-    // If isRespin or (isFreeSpin and sticky wilds are active from MonsterHealth),
-    // overwrite symbols at sticky positions with 'SYM_1' (Wild).
-    // This will be handled more robustly below.
-    let currentStickyWilds = userGameState[`${GAME_NAME}StickyWilds`] || []; // {reel: number, row: number}[]
-    let newStickyWildsThisSpin: {reel: number, row: number}[] = [];
+    userGameStateChanges[`${GAME_NAME}Reels`] = { symbols: generatedReels.symbols, positions: generatedReels.positions };
 
+    let reelsForWinCalc = JSON.parse(JSON.stringify(generatedReels.symbols));
+    currentStickyWilds.forEach(sw => {
+        if (reelsForWinCalc[sw.reel]?.[sw.row] !== undefined) reelsForWinCalc[sw.reel][sw.row] = sw.symbol;
+    });
 
-    // Apply incoming sticky wilds from previous spin/state
-    if (isFreeSpin || isRespin) {
-        currentStickyWilds.forEach((sticky: {reel: number, row: number}) => {
-            if (generatedReels.symbols[sticky.reel] && generatedReels.symbols[sticky.reel][sticky.row] !== undefined) {
-                generatedReels.symbols[sticky.reel][sticky.row] = wildSymbol;
-            }
-        });
-    }
-
-
-    // Check for new wilds on this spin to make them sticky for next respin/freespin
-    if (isFreeSpin || isRespin || !isFreeSpin) { // In base game, new wilds trigger respin
+    let newWildsFromSpinThisTurn: { reel: number, row: number, symbol: string }[] = [];
+    if (!isFreeSpin) {
         for (let r = 0; r < 5; r++) {
             for (let L = 0; L < 3; L++) {
-                if (generatedReels.symbols[r][L] === wildSymbol) {
-                    const isAlreadySticky = currentStickyWilds.some((sw: any) => sw.reel === r && sw.row === L);
-                    if (!isAlreadySticky) {
-                        newStickyWildsThisSpin.push({ reel: r, row: L });
-                    }
+                if (generatedReels.symbols[r][L] === WILD_SYMBOL_CFTBL) {
+                    const isAlreadySticky = currentStickyWilds.some(sw => sw.reel === r && sw.row === L);
+                    if (!isAlreadySticky) newWildsFromSpinThisTurn.push({ reel: r, row: L, symbol: WILD_SYMBOL_CFTBL });
                 }
             }
         }
     }
 
     let triggerRespin = false;
-    if (!isFreeSpin && !isRespin && newStickyWildsThisSpin.length > 0) {
+    if (!isFreeSpin && !isRespin && newWildsFromSpinThisTurn.length > 0) {
         triggerRespin = true;
-        currentStickyWilds = newStickyWildsThisSpin; // These become the sticky wilds for the first respin
+        currentStickyWilds = [...newWildsFromSpinThisTurn];
     } else if (isRespin) {
-        // For ongoing respins, new wilds stick and continue respins. If no new wilds, respin ends.
-        if (newStickyWildsThisSpin.length > 0) {
-            currentStickyWilds.push(...newStickyWildsThisSpin);
-            triggerRespin = true; // Continue respins
+        if (newWildsFromSpinThisTurn.length > 0) {
+            currentStickyWilds.push(...newWildsFromSpinThisTurn);
+            triggerRespin = true;
         } else {
-            triggerRespin = false; // End respins
+            triggerRespin = false;
         }
     }
 
-
-    // --- Creature From The Black Lagoon Specific Feature Logic (Free Spins) ---
-    let monsterHealth = userGameState[`${GAME_NAME}MonsterHealth`] ?? 0;
-    let featureStage = Math.floor(monsterHealth / 3); // 0-2: stage 0, 3-5: stage 1, 6-8: stage 2, 9+: stage 3
-    let additionalFreeSpinsAwarded = 0;
+    let monsterHealth = currentUserGameState[`${GAME_NAME}MonsterHealth`] ?? 0;
+    let featureStage = Math.floor(monsterHealth / 3);
+    let additionalFsAwarded = 0;
 
     if (isFreeSpin) {
-        const targetSymbol = 'SYM_2'; // Target symbol
-        if (generatedReels.symbols[4][1] === targetSymbol) { // Target on Reel 5, Middle Row (example position)
-            monsterHealth++;
-            const newFeatureStage = Math.floor(monsterHealth / 3);
-            if (newFeatureStage > featureStage) { // Stage up
-                featureStage = newFeatureStage;
-                // Spreading wild logic will apply based on new stage
-            }
-            if (monsterHealth === 9 && !(userGameState[`${GAME_NAME}Level3FSAwarded`])) { // Max health target reached first time
-                additionalFreeSpinsAwarded = 10;
-                await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}Level3FSAwarded`, true);
-            }
-        }
-
-        // Apply Spreading Wilds based on feature_stage
-        if (featureStage > 0) {
-            let wildsToSpread = 0;
-            if (featureStage === 1) wildsToSpread = 1; // Stage 1 (health 3-5): 1 wild spreads
-            if (featureStage === 2) wildsToSpread = 2; // Stage 2 (health 6-8): 2 wilds spread
-            if (featureStage >= 3) wildsToSpread = Infinity; // Stage 3 (health 9+): All wilds spread (effectively)
-
-            const existingWildPositionsThisSpin = new Set<string>();
-            currentStickyWilds.forEach(sw => existingWildPositionsThisSpin.add(`${sw.reel},${sw.row}`));
-            newStickyWildsThisSpin.forEach(sw => existingWildPositionsThisSpin.add(`${sw.reel},${sw.row}`));
-
-            let spreadCount = 0;
-            for (let r = 0; r < 5 && spreadCount < wildsToSpread; r++) {
-                for (let L = 0; L < 3 && spreadCount < wildsToSpread; L++) {
-                    if (generatedReels.symbols[r][L] === wildSymbol) {
-                        // Try to spread left
-                        if (r > 0 && generatedReels.symbols[r-1][L] !== wildSymbol) {
-                            generatedReels.symbols[r-1][L] = wildSymbol;
-                            if (!existingWildPositionsThisSpin.has(`${r-1},${L}`)) newStickyWildsThisSpin.push({reel: r-1, row: L});
-                            spreadCount++;
-                            if(spreadCount >= wildsToSpread && featureStage < 3) break; // Limit spreads unless stage 3
-                        }
-                        // Try to spread right
-                        if (r < 4 && generatedReels.symbols[r+1][L] !== wildSymbol && (spreadCount < wildsToSpread || featureStage >=3)) {
-                            generatedReels.symbols[r+1][L] = wildSymbol;
-                             if (!existingWildPositionsThisSpin.has(`${r+1},${L}`)) newStickyWildsThisSpin.push({reel: r+1, row: L});
-                            spreadCount++;
-                            if(spreadCount >= wildsToSpread && featureStage < 3) break;
-                        }
-                    }
+        for(let rowIdx = 0; rowIdx < 3; rowIdx++){
+            if (generatedReels.symbols[4][rowIdx] === TARGET_SYMBOL_CFTBL) {
+                monsterHealth++;
+                featureStage = Math.floor(monsterHealth / 3);
+                if (monsterHealth >= 9 && !(currentUserGameState[`${GAME_NAME}Level3FSAwarded`])) {
+                    additionalFsAwarded = 10;
+                    userGameStateChanges[`${GAME_NAME}Level3FSAwarded`] = true;
                 }
-                 if(spreadCount >= wildsToSpread && featureStage < 3) break;
-            }
-        }
-        // Consolidate all sticky wilds for free spins
-        currentStickyWilds.push(...newStickyWildsThisSpin);
-        // Deduplicate currentStickyWilds
-        const uniqueStickyWilds = new Map<string, {reel:number, row:number}>();
-        currentStickyWilds.forEach(sw => uniqueStickyWilds.set(`${sw.reel},${sw.row}`, sw));
-        currentStickyWilds = Array.from(uniqueStickyWilds.values());
-    }
-
-
-    // 5. Calculate Line Wins (using potentially modified generatedReels)
-    let totalWinCoins = 0;
-    const lineWinsArray: any[] = []; // For response: { lineId, symbol, count, winCoins }
-    const wildSymbol = 'SYM_1'; // Assuming SYM_1 is Wild for Creature from the Black Lagoon
-
-    for (let i = 0; i < PAYLINES.length; i++) {
-        const payline = PAYLINES[i];
-        const symbolsOnLine: string[] = [];
-        for (let reelIdx = 0; reelIdx < payline.length; reelIdx++) {
-            symbolsOnLine.push(generatedReels.symbols[reelIdx][payline[reelIdx]]);
-        }
-
-        let firstSymbol = symbolsOnLine[0];
-        let matchCount = 0;
-        let lineWilds = 0;
-
-        // Check left-to-right
-        for (let k = 0; k < symbolsOnLine.length; k++) {
-            if (symbolsOnLine[k] === firstSymbol || symbolsOnLine[k] === wildSymbol) {
-                matchCount++;
-                if (symbolsOnLine[k] === wildSymbol && firstSymbol !== wildSymbol) { // Wild substituting a non-wild
-                    lineWilds++;
-                } else if (symbolsOnLine[k] !== wildSymbol && firstSymbol === wildSymbol && k > 0) {
-                    // If the line started with wilds, the first non-wild determines the symbol type
-                    firstSymbol = symbolsOnLine[k];
-                }
-            } else {
                 break;
             }
         }
 
-        // If line starts with Wilds, and all are wilds, firstSymbol remains wild.
-        // Need to check if paytable has entries for pure wild wins.
-        if (firstSymbol === wildSymbol && matchCount > 0 && lineWilds === matchCount) {
-             // Pure wild line, check paytable for wild symbol payouts
-        }
+        let tempReelsAfterSpreading = JSON.parse(JSON.stringify(reelsForWinCalc));
+        if (featureStage >= 1) {
+            const wildsOnScreen = [];
+            for (let r = 0; r < 5; r++) for (let L = 0; L < 3; L++) if (tempReelsAfterSpreading[r][L] === WILD_SYMBOL_CFTBL) wildsOnScreen.push({r,L});
 
+            let spreadInitiatorCount = 0;
+            const maxSpreadInitiators = (featureStage === 1) ? 1 : (featureStage >= 2 ? 2 : Infinity); // Stage 3 all wilds spread.
 
-        const paytableEntry = gameConfig.paytable.find(
-            (p) => p.symbol === firstSymbol && p.match_count === matchCount
-        );
-
-        if (paytableEntry && paytableEntry.payout_multiplier > 0) {
-            const winForLineCoins = paytableEntry.payout_multiplier * betLevel;
-            totalWinCoins += winForLineCoins;
-            lineWinsArray.push({
-                lineId: i + 1,
-                symbol: firstSymbol,
-                count: matchCount,
-                winCoins: winForLineCoins,
-                winCents: winForLineCoins * denom * 100,
-            });
-        }
-    }
-
-    const totalWinCurrency = totalWinCoins * denom;
-    spinLogEntry.winAmount = totalWinCurrency;
-
-    // Update userGameState with the outcomes of this spin
-    if (isFreeSpin) {
-        userGameState[`${GAME_NAME}CurrentFreeGame`] = (userGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0) + 1;
-        if (additionalFreeSpinsAwarded > 0) {
-            userGameState[`${GAME_NAME}FreeGames`] = (userGameState[`${GAME_NAME}FreeGames`] ?? 0) + additionalFreeSpinsAwarded;
-        }
-        userGameState[`${GAME_NAME}MonsterHealth`] = monsterHealth;
-        userGameState[`${GAME_NAME}StickyWilds`] = currentStickyWilds; // Save all current sticky wilds
-        userGameState[`${GAME_NAME}BonusWin`] = (userGameState[`${GAME_NAME}BonusWin`] ?? 0) + totalWinCoins;
-    } else if (isRespin) {
-        if (triggerRespin) { // Respin continues
-            userGameState[`${GAME_NAME}StickyWilds`] = currentStickyWilds;
-        } else { // Respin ends
-            delete userGameState[`${GAME_NAME}StickyWilds`];
-            delete userGameState[`${GAME_NAME}IsRespinActive`]; // A flag to indicate respin mode
-        }
-    } else if (triggerRespin) { // Base game spin triggered a respin
-        userGameState[`${GAME_NAME}StickyWilds`] = currentStickyWilds;
-        userGameState[`${GAME_NAME}IsRespinActive`] = true;
-        // Save current bet/denom for respins if not already part of userGameState
-        userGameState[`${GAME_NAME}DenomForRespin`] = denom;
-        userGameState[`${GAME_NAME}BetLevelForRespin`] = betLevel;
-    }
-
-
-    // 6. Scatter Handling & Free Spin Trigger (Simplified) - This was for initial trigger
-    // Scatter symbol for CFTBL is 'SYM_0'
-    let scatterCount = 0;
-    generatedReels.symbols.forEach(reelSymbols => {
-        reelSymbols.forEach(symbol => {
-            if (symbol === 'SYM_0') scatterCount++;
-        });
-    });
-
-    let freeSpinsTriggered = 0; // This is for initial trigger from base game
-    // let scatterWinCoins = 0; // Scatter wins are usually part of paytable lookup
-
-    if (!isFreeSpin && !isRespin && scatterCount >= 3) { // Initial trigger only
-        // From Paytable: SYM_0 for scatter wins (usually 0 multiplier, triggers free spins)
-        // Free spins count from gameConfig.settings.slotFreeCount (array: [0,0,0,10,15,20] for 0,1,2,3,4,5 scatters)
-        const fsCounts = gameConfig.settings?.slotFreeCount || [0,0,0,10,15,20]; // [0sc,1sc,2sc,3sc,4sc,5sc] -> free games
-        freeSpinsTriggered = fsCounts[Math.min(scatterCount, fsCounts.length -1)] || 0;
-
-        if (freeSpinsTriggered > 0) {
-            userGameState[`${GAME_NAME}FreeGames`] = freeSpinsTriggered;
-            userGameState[`${GAME_NAME}CurrentFreeGame`] = 0; // Will be incremented at start of first free spin
-            userGameState[`${GAME_NAME}BonusWin`] = 0;
-            userGameState[`${GAME_NAME}MonsterHealth`] = 0;
-            userGameState[`${GAME_NAME}StickyWilds`] = []; // Clear previous sticky wilds
-            userGameState[`${GAME_NAME}Level3FSAwarded`] = false; // Reset flag for +10 FS
-        }
-    }
-
-    // 9. Update Balance (add winnings) & Persist All User Game States
-    let finalUser = user; // User object that might be updated by balance change
-    if (totalWinCurrency > 0) {
-        const winUpdateArgs: UpdateUserBalanceArgs = {
-            userId,
-            amount: totalWinCurrency,
-            transactionType: isFreeSpin ? 'freespin_win' : (isRespin ? 'respin_win' : 'spin_win'),
-            systemName: isFreeSpin ? 'freespin' : (isRespin ? 'respin' : 'spin'),
-        };
-        finalUser = await UserService.updateUserBalance(winUpdateArgs) || user; // Fallback to original user if update fails
-    }
-    spinLogEntry.userBalanceAfterSpin = finalUser.balance ?? 0;
-
-    // Persist all accumulated game state changes
-    for (const key in finalReelPositions) { // Save current reel positions
-        await UserGameStateService.updateUserGameState(userId, gameConfig.id, key, finalReelPositions[key]);
-    }
-    // Save other states modified within _performSpinLogic or by callers
-    for (const key in userGameState) {
-        await UserGameStateService.updateUserGameState(userId, gameConfig.id, key, userGameState[key]);
-    }
-
-
-    // 10. Construct Response Object
-    let nextAction = "spin";
-    let gameIsOver = true;
-    if (isFreeSpin && userGameState[`${GAME_NAME}CurrentFreeGame`] < userGameState[`${GAME_NAME}FreeGames`]) {
-        nextAction = "freespin";
-        gameIsOver = false;
-    } else if (triggerRespin) {
-        nextAction = "respin";
-        gameIsOver = false;
-    } else if (freeSpinsTriggered > 0) { // Just triggered FS from a base spin
-        nextAction = "freespin"; // Client should init free spins
-        gameIsOver = false;
-    }
-
-    // If free spins just ended
-    if (isFreeSpin && userGameState[`${GAME_NAME}CurrentFreeGame`] >= userGameState[`${GAME_NAME}FreeGames`]) {
-        nextAction = "spin"; // Back to base game
-        gameIsOver = true;
-        // Clear free spin related states
-        await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}FreeGames`, 0);
-        await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}CurrentFreeGame`, 0);
-        await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}StickyWilds`, []);
-        await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}MonsterHealth`, 0);
-        await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}Level3FSAwarded`, false);
-    }
-    // If respins just ended
-    if (isRespin && !triggerRespin) {
-        nextAction = "spin";
-        gameIsOver = true;
-        await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}StickyWilds`, []);
-        await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}IsRespinActive`, false);
-    }
-
-
-    const responseObject: Record<string, any> = {
-        clientaction: isFreeSpin ? 'freespin' : (isRespin ? 'respin' : 'spin'),
-        credit: Math.round((finalUser.balance ?? 0) * 100),
-        gameover: gameIsOver.toString(),
-        nextaction: nextAction,
-        gamestate_current: isFreeSpin ? `freespin${featureStage}` : (isRespin || triggerRespin ? 'respin' : 'basic'),
-        bet_denomination: denom * 100,
-        bet_betlevel: betLevel,
-        bet_lines: lines,
-        // Reel display
-        ...(() => { // Format reel data as rs.i0.r.iX.syms and pos
-            const reelData: Record<string, string> = {};
-            for (let r = 0; r < 5; r++) {
-                const currentReelSymbols = generatedReels.symbols[r];
-                reelData[`rs.i0.r.i${r}.syms`] = `${currentReelSymbols[0]}%2C${currentReelSymbols[1]}%2C${currentReelSymbols[2]}`;
-                reelData[`rs.i0.r.i${r}.pos`] = generatedReels.positions[r].toString();
+            for (const wildPos of wildsOnScreen) {
+                if (spreadInitiatorCount >= maxSpreadInitiators && featureStage < 3) break;
+                let hasSpreadFromThisWild = false;
+                if (wildPos.r > 0 && tempReelsAfterSpreading[wildPos.r - 1][wildPos.L] !== WILD_SYMBOL_CFTBL) {
+                    tempReelsAfterSpreading[wildPos.r - 1][wildPos.L] = WILD_SYMBOL_CFTBL; hasSpreadFromThisWild = true;
+                }
+                if ((featureStage >= 2 || (featureStage === 1 && !hasSpreadFromThisWild)) && wildPos.r < 4 && tempReelsAfterSpreading[wildPos.r + 1][wildPos.L] !== WILD_SYMBOL_CFTBL) {
+                    tempReelsAfterSpreading[wildPos.r + 1][wildPos.L] = WILD_SYMBOL_CFTBL; hasSpreadFromThisWild = true;
+                }
+                if(hasSpreadFromThisWild) spreadInitiatorCount++;
             }
-            return reelData;
-        })(),
-        // Sticky/Overlay Wilds for response (simplified)
-        // PHP format: rs.i0.r.0.overlay.i0.row=1&rs.i0.r.0.overlay.i0.with=SYM_1&...
-        ...(() => {
-            const overlayData: Record<string, string> = {};
-            let overlayIndex = 0;
-            currentStickyWilds.forEach((sw: any) => {
-                 // Assuming only one overlay set 'rs.i0.'
-                overlayData[`rs.i0.r.${sw.reel}.overlay.i${overlayIndex}.row`] = sw.row.toString();
-                overlayData[`rs.i0.r.${sw.reel}.overlay.i${overlayIndex}.with`] = wildSymbol; // SYM_1
-                // PHP might have a specific 'pos' for overlays too, not just row.
-                overlayIndex++;
-            });
-            return overlayData;
-        })(),
+        }
+        reelsForWinCalc = tempReelsAfterSpreading;
 
-        game_win_cents: Math.round(totalWinCurrency * 100),
-        game_win_coins: totalWinCoins,
-        totalwin_cents: isFreeSpin ? Math.round((userGameState[`${GAME_NAME}BonusWin`] ?? 0) * denom * 100) : Math.round(totalWinCurrency * 100),
-        totalwin_coins: isFreeSpin ? (userGameState[`${GAME_NAME}BonusWin`] ?? 0) : totalWinCoins,
+        currentStickyWilds = [];
+        for (let r = 0; r < 5; r++) for (let L = 0; L < 3; L++) if (reelsForWinCalc[r][L] === WILD_SYMBOL_CFTBL) currentStickyWilds.push({ reel: r, row: L, symbol: WILD_SYMBOL_CFTBL });
+    }
 
-        freespins_total: userGameState[`${GAME_NAME}FreeGames`] ?? 0,
-        freespins_left: Math.max(0, (userGameState[`${GAME_NAME}FreeGames`] ?? 0) - (userGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0)),
-        freespins_multiplier: 1, // CFTBL doesn't have a general multiplier, but feature stage implies wild changes
-        freespins_totalwin_cents: Math.round((userGameState[`${GAME_NAME}BonusWin`] ?? 0) * denom * 100),
-        freespins_totalwin_coins: userGameState[`${GAME_NAME}BonusWin`] ?? 0,
+    const uniqueStickyMap = new Map<string, {reel:number, row:number, symbol:string}>();
+    currentStickyWilds.forEach(sw => uniqueStickyMap.set(`${sw.reel},${sw.row}`, sw));
+    userGameStateChanges[`${GAME_NAME}StickyWilds`] = Array.from(uniqueStickyMap.values());
+    userGameStateChanges[`${GAME_NAME}MonsterHealth`] = monsterHealth;
 
-        feature_stage: `stage${featureStage}`, // Monster health stage
-        collectablesWon: monsterHealth, // Monster health points
 
-        // Additional fields from analyzing a typical NetEnt response
-        doublemoney: "false",
-        matrix Centrertrld: generatedReels.symbols.map(r => r.join(',')).join(';'), // Example flat matrix
-        roundid: `round-${Date.now()}`, // Unique round ID
-        actionid: `action-${Date.now()}`,
-        // line_wins details are important for client animation
-        // Example: wl.i0.l=1&wl.i0.s=SYM_4&wl.i0.c=3&wl.i0.w=50&...
-        ...lineWinsArray.reduce((acc, lw, idx) => {
-            acc[`wl.i${idx}.l`] = lw.lineId.toString();
-            acc[`wl.i${idx}.s`] = lw.symbol;
-            acc[`wl.i${idx}.c`] = lw.count.toString();
-            acc[`wl.i${idx}.w`] = lw.winCoins.toString();
-            return acc;
-        }, {} as Record<string, string>),
+    let totalWinCoins = 0;
+    const lineWinsArray: any[] = [];
+    for (let i = 0; i < PAYLINES.length; i++) {
+        const payline = PAYLINES[i];
+        const symbolsOnLine: string[] = []; const symbolPositionsOnLine: { col: number, row: number }[] = []; // col is reelIdx
+        for (let reelIdx = 0; reelIdx < payline.length; reelIdx++) {
+            symbolsOnLine.push(reelsForWinCalc[reelIdx][payline[reelIdx]]);
+            symbolPositionsOnLine.push({ col: reelIdx, row: payline[reelIdx] });
+        }
+        let firstSymbol = symbolsOnLine[0];
+        if (firstSymbol === WILD_SYMBOL_CFTBL) {
+            let k = 1; while(k < symbolsOnLine.length && symbolsOnLine[k] === WILD_SYMBOL_CFTBL) k++;
+            if (k < symbolsOnLine.length && symbolsOnLine[k] !== SCATTER_SYMBOL_CFTBL) firstSymbol = symbolsOnLine[k];
+        }
+        let matchCount = 0;
+        for (let k = 0; k < symbolsOnLine.length; k++) {
+            if (symbolsOnLine[k] === firstSymbol || symbolsOnLine[k] === WILD_SYMBOL_CFTBL) matchCount++; else break;
+        }
+        const paytableEntry = gameConfig.paytable.find(p => p.symbol === firstSymbol && p.match_count === matchCount);
+        if (paytableEntry && paytableEntry.payout_multiplier > 0) {
+            const winForLineCoins = Number(paytableEntry.payout_multiplier) * betLevel;
+            totalWinCoins += winForLineCoins;
+            lineWinsArray.push({ lineIndex: i, symbol: firstSymbol, numSymbols: matchCount, winCoins: winForLineCoins, positions: symbolPositionsOnLine.slice(0, matchCount) });
+        }
+    }
 
-        _message: "Spin logic with features (sticky/spreading wilds, monster health) partially implemented.",
+    let scatterCount = 0;
+    for (let r = 0; r < 5; r++) for (let L = 0; L < 3; L++) if (reelsForWinCalc[r][L] === SCATTER_SYMBOL_CFTBL) scatterCount++;
+
+    let nextAction = "spin"; let gameIsOver = true; let freeSpinsAwardedThisSpin = 0;
+    let currentFsTotal = currentUserGameState[`${GAME_NAME}FreeGames`] ?? 0;
+    let currentFsPlayed = currentUserGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0;
+    let currentBonusWin = currentUserGameState[`${GAME_NAME}BonusWin`] ?? 0;
+
+
+    if (!isFreeSpin && !isRespin && triggerRespin) {
+        userGameStateChanges[`${GAME_NAME}IsRespinActive`] = true;
+        userGameStateChanges[`${GAME_NAME}DenomForRespin`] = denom;
+        userGameStateChanges[`${GAME_NAME}BetLevelForRespin`] = betLevel;
+    }
+
+    if (!isFreeSpin && !isRespin && !triggerRespin && scatterCount >= 3) {
+        const fsCounts = gameConfig.settings?.slotFreeCount || [0,0,0,10,15,20];
+        freeSpinsAwardedThisSpin = fsCounts[Math.min(scatterCount, fsCounts.length - 1)] || 0;
+        if (freeSpinsAwardedThisSpin > 0) {
+            userGameStateChanges[`${GAME_NAME}FreeGames`] = freeSpinsAwardedThisSpin;
+            currentFsTotal = freeSpinsAwardedThisSpin;
+            userGameStateChanges[`${GAME_NAME}CurrentFreeGame`] = 0; currentFsPlayed = 0;
+            userGameStateChanges[`${GAME_NAME}BonusWin`] = 0; currentBonusWin = 0;
+            userGameStateChanges[`${GAME_NAME}MonsterHealth`] = 0; // Reset monster health on new FS trigger
+            userGameStateChanges[`${GAME_NAME}StickyWilds`] = []; // Clear stickies on new FS trigger
+            userGameStateChanges[`${GAME_NAME}Level3FSAwarded`] = false;
+            userGameStateChanges[`${GAME_NAME}FreeSpinsActive`] = true;
+            userGameStateChanges[`${GAME_NAME}DenomForFS`] = denom;
+            userGameStateChanges[`${GAME_NAME}BetLevelForFS`] = betLevel;
+        }
+    }
+
+    if (isFreeSpin) {
+        currentFsPlayed = (currentUserGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0) + 1;
+        userGameStateChanges[`${GAME_NAME}CurrentFreeGame`] = currentFsPlayed;
+        currentBonusWin = (currentUserGameState[`${GAME_NAME}BonusWin`] ?? 0) + totalWinCoins;
+        userGameStateChanges[`${GAME_NAME}BonusWin`] = currentBonusWin;
+        if (additionalFsAwarded > 0) currentFsTotal += additionalFsAwarded; // Already saved to UGSChanges
+
+        if (currentFsPlayed >= currentFsTotal) {
+            nextAction = "spin"; gameIsOver = true; userGameStateChanges[`${GAME_NAME}FreeSpinsActive`] = false;
+            // Reset FS specific states
+             userGameStateChanges[`${GAME_NAME}StickyWilds`] = [];
+             userGameStateChanges[`${GAME_NAME}MonsterHealth`] = 0;
+             userGameStateChanges[`${GAME_NAME}Level3FSAwarded`] = false;
+        } else {
+            nextAction = "freespin"; gameIsOver = false;
+        }
+    } else if (isRespin) {
+        if (triggerRespin) {
+            nextAction = "respin"; gameIsOver = false;
+        } else {
+            nextAction = "spin"; gameIsOver = true; userGameStateChanges[`${GAME_NAME}IsRespinActive`] = false; userGameStateChanges[`${GAME_NAME}StickyWilds`] = [];
+        }
+    } else if (triggerRespin) {
+        nextAction = "respin"; gameIsOver = false;
+    } else if (freeSpinsAwardedThisSpin > 0) {
+        nextAction = "freespin"; gameIsOver = false;
+    }
+
+    return {
+        userGameStateChanges,
+        generatedReelsForResponse: { symbols: reelsForWinCalc, positions: generatedReels.positions },
+        totalWinCoins,
+        lineWinsArray,
+        scatterCount,
+        nextAction,
+        gameIsOver,
+        currentStickyWildsResult: userGameStateChanges[`${GAME_NAME}StickyWilds`] || [], // Use the final sticky state
+        monsterHealthResult: userGameStateChanges[`${GAME_NAME}MonsterHealth`] ?? monsterHealth,
+        featureStageResult: Math.floor((userGameStateChanges[`${GAME_NAME}MonsterHealth`] ?? monsterHealth) / 3),
+        freeSpinsAwardedThisSpinResult: freeSpinsAwardedThisSpin,
+        freeSpinsLeftResult: Math.max(0, currentFsTotal - currentFsPlayed),
+        freeSpinsTotalResult: currentFsTotal,
+        currentFreeGameResult: currentFsPlayed,
+        bonusWinCoinsResult: currentBonusWin,
+        expansionDidOccur: false, // CFTBL spreading wilds are part of normal win calc, not separate "expansion pay"
+        expandedSymbolId: null,
+        expandedWinCoins: 0,
     };
-
-    // 11. Log Spin
-    spinLogEntry.responseData = JSON.stringify(responseObject);
-    // TODO: Populate bank details (toGameBanks, betProfit) in spinLogEntry more accurately.
-    await LogService.logGameSpin(spinLogEntry as GameSpinLogData);
-
-    return c.json(responseObject);
 }
-
 
 const handleInit = async (c: Context) => {
   const jwtPayload = c.get('user');
-  // Ensure sub is treated as number if your user IDs are numeric
   const userIdString = jwtPayload?.sub;
 
   if (!userIdString) {
@@ -457,9 +272,9 @@ const handleInit = async (c: Context) => {
     return c.json({ error: 'Invalid user ID format in token' }, 400);
   }
 
-  const sessid = c.req.query('sessid'); // Session ID from client, if used for anything
+  const sessid = c.req.query('sessid');
   console.log(`[${GAME_NAME}] Init action called for user ${userId}, client session ${sessid}`);
-  console.log(`[${GAME_NAME}] All Query Params:`, c.req.query());
+  // console.log(`[${GAME_NAME}] All Query Params:`, c.req.query()); // Too verbose for regular logs
 
   try {
     const user = await UserService.getUserById(userId);
@@ -468,123 +283,159 @@ const handleInit = async (c: Context) => {
     if (!user) return c.json({ error: 'User not found' }, 404);
     if (!gameConfig) return c.json({ error: `Game configuration not found for ${GAME_NAME}` }, 500);
 
-    // Initialize/reset some user game states for this game upon init
-    // This is a simplified approach. PHP logic might be more conditional.
-    // These keys are specific to CreatureFromTheBlackLagoonNET based on its SlotSettings.php
-    await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}BonusWin`, 0);
-    await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}FreeGames`, 0);
-    await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}CurrentFreeGame`, 0);
-    await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}TotalWin`, 0);
-    await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}MonsterHealth`, 0); // CFTBL specific state
-    // 'FreeBalance' in PHP seems to be user.balance; 'Denom' and 'Bet' are part of game state.
-    // Let's assume current denomination and bet level are stored or defaulted.
+    let userGameState = await UserGameStateService.getUserGameState(userId, gameConfig.id);
 
-    const defaultDenom = gameConfig.settings?.Denominations?.[0] ?? gameConfig.denomination ?? 0.01;
-    const defaultBetLevel = gameConfig.settings?.bet_levels?.[0] ?? 1;
+    const currentDenom = userGameState[`${GAME_NAME}Denom`] ?? gameConfig.settings?.Denominations?.[0] ?? gameConfig.denomination ?? 0.01;
+    const currentBetLevel = userGameState[`${GAME_NAME}BetLevel`] ?? gameConfig.settings?.bet_levels?.[0] ?? 1;
 
-    await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}Denom`, defaultDenom);
-    await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}BetLevel`, defaultBetLevel);
-
-
-    // Load all game states for this user and game to see if we need to restore anything
-    const userGameState = await UserGameStateService.getUserGameState(userId, gameConfig.id);
-
-    // Constructing the response object. This needs to match the PHP server's URL-encoded string structure.
-    // The PHP response is a flat key-value structure.
-    // Example from PHP: "rs.i0.r.i0.syms=SYM_7%2CSYM_0%2CSYM_7&rs.i0.r.i0.pos=0&..."
-    // We will build a JSON object that the client-side will then need to handle.
-    // If the client strictly expects URL-encoded, Hono can set Content-Type and body accordingly.
-    // For now, returning JSON and noting client adaptation might be needed.
-
-    const balanceInCents = Math.round((user.balance ?? 0) * 100); // Assuming balance is in currency units
-
-    // Simplified initial reel display (placeholder - PHP logic is complex)
-    // The game client expects specific symbols based on reel strips.
-    // PHP's `curReels` string is generated if no history or not in free spins.
-    let rs_i0_r_iX_syms: Record<string, string> = {};
-    let rs_i0_r_iX_pos: Record<string, string> = {};
-
-    for (let i = 0; i < 5; i++) { // 5 reels for CFTBL
-        const reelStripKey = `reelStrip${i + 1}`; // e.g., reelStrip1
-        const reelStrip = gameConfig.reel_strips[reelStripKey] || [];
-        const pos = userGameState[`${GAME_NAME}Reel${i+1}Pos`] ?? Math.floor(Math.random() * Math.max(1, reelStrip.length - 2));
-
-        const sym1 = reelStrip[pos] || 'SYM_0'; // Default symbol if strip is short/pos is off
-        const sym2 = reelStrip[pos + 1] || 'SYM_0';
-        const sym3 = reelStrip[pos + 2] || 'SYM_0';
-
-        rs_i0_r_iX_syms[`rs.i0.r.i${i}.syms`] = `${sym1}%2C${sym2}%2C${sym3}`; // URL encoded comma
-        rs_i0_r_iX_pos[`rs.i0.r.i${i}.pos`] = pos.toString();
+    if (userGameState[`${GAME_NAME}Denom`] === undefined) {
+        await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}Denom`, currentDenom);
+         userGameState[`${GAME_NAME}Denom`] = currentDenom; // Update local copy
+    }
+    if (userGameState[`${GAME_NAME}BetLevel`] === undefined) {
+        await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}BetLevel`, currentBetLevel);
+        userGameState[`${GAME_NAME}BetLevel`] = currentBetLevel; // Update local copy
     }
 
-    // Check for active free spins to determine game state
-    const freeGamesLeft = userGameState[`${GAME_NAME}FreeGames`] ?? 0;
-    const currentFreeGame = userGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0;
-    let gameStateCurrent = "basic"; // 'basic', 'freespinA', 'freespinB', 'freespinC' etc.
-    let nextAction = "spin";
-    let freeSpinsTotal = 0;
-    let freeSpinsLeft = 0;
-    let freeSpinsMultiplier = 1; // CFTBL has multiplier based on monster health in free spins
-    let freeSpinsTotalWinCents = 0;
+    const activeRespin = userGameState[`${GAME_NAME}IsRespinActive`] === true;
+    const activeFreeSpins = userGameState[`${GAME_NAME}FreeSpinsActive`] === true &&
+                           (userGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0) < (userGameState[`${GAME_NAME}FreeGames`] ?? 0);
 
-    if (freeGamesLeft > 0 && currentFreeGame > 0 && currentFreeGame <= freeGamesLeft) {
-        gameStateCurrent = `freespin${userGameState[`${GAME_NAME}MonsterHealth`] || 'A'}`; // Or more specific state
-        nextAction = "freespin";
-        freeSpinsTotal = freeGamesLeft;
-        freeSpinsLeft = freeGamesLeft - currentFreeGame +1; // Adjust based on how CurrentFreeGame is counted
-        // freeSpinsMultiplier might depend on MonsterHealth state
-        freeSpinsTotalWinCents = (userGameState[`${GAME_NAME}BonusWin`] ?? 0) * 100 * defaultDenom;
+    if (!activeRespin && !activeFreeSpins) {
+        const initialStatesToSet = {
+            [`${GAME_NAME}BonusWin`]: 0,
+            [`${GAME_NAME}FreeGames`]: 0,
+            [`${GAME_NAME}CurrentFreeGame`]: 0,
+            [`${GAME_NAME}TotalWin`]: 0, // This might be overall session total win, not just feature.
+            [`${GAME_NAME}MonsterHealth`]: 0,
+            [`${GAME_NAME}StickyWilds`]: [],
+            [`${GAME_NAME}Level3FSAwarded`]: false,
+        };
+        for(const key in initialStatesToSet) {
+            await UserGameStateService.updateUserGameState(userId, gameConfig.id, key, initialStatesToSet[key as keyof typeof initialStatesToSet]);
+            userGameState[key] = initialStatesToSet[key as keyof typeof initialStatesToSet];
+        }
     }
-
 
     const responseObject: Record<string, any> = {
-      clientaction: 'init',
-      playercurrencyiso: user.currency || 'EUR', // Default if not set
-      jackpotcurrencyiso: user.currency || 'EUR',
-      credit: balanceInCents, // User's total balance in cents
-      gameover: freeGamesLeft > 0 ? 'false' : 'true', // True if not in active free spins
-      nextaction: nextAction,
-      gamestate_current: gameStateCurrent,
-      // Denominations and Bet Levels (example, needs to pull from gameConfig.settings)
-      denomination_all: (gameConfig.settings?.Denominations || [0.01, 0.02, 0.05, 0.10, 0.20]).map(d => d*100).join('%2C'), // in cents
-      betlevel_all: (gameConfig.settings?.bet_levels || [1, 2, 3, 4, 5, 10]).join('%2C'),
-      bet_denomination: (userGameState[`${GAME_NAME}Denom`] ?? defaultDenom) * 100, // in cents
-      bet_betlevel: userGameState[`${GAME_NAME}BetLevel`] ?? defaultBetLevel,
-      bet_lines: gameConfig.settings?.lines ?? 20, // Assuming fixed lines for CFTBL
-
-      // Reel display (simplified)
-      ...rs_i0_r_iX_syms,
-      ...rs_i0_r_iX_pos,
-      // rs.i1 would be for the feature reel strips (e.g. sticky wilds in CFTBL) - needs population if feature active
-
-      // Win amounts (initially 0)
-      game_win_cents: 0,
-      game_win_coins: 0,
-      totalwin_cents: freeSpinsTotalWinCents, // Total win in current free spin session
-      totalwin_coins: freeSpinsTotalWinCents / ((userGameState[`${GAME_NAME}Denom`] ?? defaultDenom) * 100),
-
-      // Free spins related fields
-      freespins_total: freeSpinsTotal,
-      freespins_left: freeSpinsLeft,
-      freespins_multiplier: freeSpinsMultiplier,
-      freespins_totalwin_cents: freeSpinsTotalWinCents,
-      freespins_totalwin_coins: freeSpinsTotalWinCents / ((userGameState[`${GAME_NAME}Denom`] ?? defaultDenom) * 100),
-
-      // Creature From The Black Lagoon specific state
-      feature_stage: `stage${userGameState[`${GAME_NAME}MonsterHealth`] || 0}`, // e.g. stage0, stage1, stage2, stage3
-
-      // Static or less dynamic values often found in PHP init response
-      flashvars_gameRulesUrl: "/rules/CreatureFromTheBlackLagoonNET/rules_en.html", // Example
-      flashvars_helpUrl: "/rules/CreatureFromTheBlackLagoonNET/rules_en.html", // Example
-      flashvars_lang: "en",
-      // ... many other potential fields from PHP's init string
-      // It's crucial to capture all necessary fields the client expects.
-      // This response is still a partial representation.
-      _message: "Init action partially implemented. Response structure needs to be carefully matched with PHP output.",
+        clientaction: 'init',
+        playercurrencyiso: user.currency || gameConfig.settings?.playercurrencyiso || 'EUR',
+        jackpotcurrencyiso: user.currency || gameConfig.settings?.jackpotcurrencyiso || 'EUR',
+        credit: Math.round((user.balance ?? 0) * 100),
+        game_win_cents: 0, game_win_coins: 0, totalwin_cents: 0, totalwin_coins: 0,
+        denomination_all: (gameConfig.settings?.Denominations || [0.01,0.02,0.05,0.10,0.20]).map(d => d*100).join('%2C'),
+        betlevel_all: (gameConfig.settings?.bet_levels || [1,2,3,4,5,10]).join('%2C'),
+        bet_denomination: currentDenom * 100,
+        denomination_standard: currentDenom * 100,
+        bet_betlevel: currentBetLevel,
+        bet_lines: gameConfig.settings?.lines ?? 20,
+        casinoID: gameConfig.settings?.casinoID || "netent",
+        gameServerVersion: gameConfig.settings?.gameServerVersion || "1.5.0",
+        staticsharedurl: gameConfig.settings?.staticsharedurl || "https://static.casinomodule.com/shared/",
+        gamesoundurl: gameConfig.settings?.gamesoundurl || `https://static.casinomodule.com/games/netent/${GAME_NAME.toLowerCase()}/`,
+        historybutton: "false", fullscreenallowed: "true", autoplayallowed: "true",
+        autoplaydefault: gameConfig.settings?.autoplaydefault || 10,
+        flashvars_gameRulesUrl: gameConfig.settings?.gameRulesUrl || `/rules/${GAME_NAME}/rules_en.html`,
+        flashvars_helpUrl: gameConfig.settings?.helpUrl || `/rules/${GAME_NAME}/rules_en.html`,
+        flashvars_lang: "en", label: gameConfig.title || GAME_NAME, gametitle: gameConfig.title || GAME_NAME,
+        playforfun: "false", multiplier: "1", betlinesconfig: "1", betlevelconfig: "1",
+        coinconfig: (currentDenom*100).toString(), creditschosentype: "coin", currencydecimaldigits: "2",
+        currencyprefix: "", currencysuffix: user.currency || "EUR", currencyspace: "true",
+        currencythousandseparator: ",", maxbet: gameConfig.settings?.maxBet || "100.00",
+        minbet: gameConfig.settings?.minBet || "0.20", nearwinallowed: "false",
+        slotTheme: gameConfig.settings?.slotTheme || "underwater",
+        softwareversion: gameConfig.settings?.softwareversion || "2.10.6",
+        theme: gameConfig.settings?.theme || "generic",
+        volatility: gameConfig.settings?.volatility || "5",
+        wavecount: userGameState[`${GAME_NAME}MonsterHealth`] || 0,
+        collectablesWon: userGameState[`${GAME_NAME}MonsterHealth`] || 0,
+        feature_stage: `stage${Math.floor((userGameState[`${GAME_NAME}MonsterHealth`] || 0) / 3)}`,
+        ...PAYLINES.reduce((acc, lineCoords, index) => {
+            acc[`bl.i${index}.line`] = lineCoords.join('%2C');
+            acc[`bl.i${index}.id`] = index.toString();
+            return acc;
+        }, {} as Record<string, string>),
+        "bl.standard": PAYLINES.map((_, i) => i).join('%2C'),
     };
 
-    // TODO: Log this init action if necessary, though init usually doesn't have bet/win.
-    // LogService.logGameSpin({ userId, gameId: gameConfig.id, gameName: GAME_NAME, responseData: JSON.stringify(responseObject), betAmount: 0, winAmount: 0, userBalanceAfterSpin: user.balance });
+    const currentMonsterHealthInit = userGameState[`${GAME_NAME}MonsterHealth`] ?? 0;
+    const freeSpinsTotalInit = userGameState[`${GAME_NAME}FreeGames`] ?? 0;
+    const freeSpinsPlayedInit = userGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0;
+
+    if (activeFreeSpins) {
+        responseObject.restore = "true";
+        responseObject.gamestate_current = `freespinlevel${Math.floor(currentMonsterHealthInit / 3)}`;
+        responseObject.nextaction = "freespin"; responseObject.gameover = "false";
+        responseObject.freespins_initial = freeSpinsTotalInit;
+        responseObject.freespins_total = freeSpinsTotalInit;
+        responseObject.freespins_left = freeSpinsTotalInit - freeSpinsPlayedInit;
+        responseObject.freespins_multiplier = 1;
+        const fsTotalWinCoins = userGameState[`${GAME_NAME}BonusWin`] ?? 0;
+        responseObject.freespins_totalwin_coins = fsTotalWinCoins;
+        responseObject.freespins_totalwin_cents = Math.round(fsTotalWinCoins * currentDenom * 100);
+        responseObject.totalwin_coins = fsTotalWinCoins;
+        responseObject.totalwin_cents = Math.round(fsTotalWinCoins * currentDenom * 100);
+
+        const savedReelsRaw = userGameState[`${GAME_NAME}Reels`];
+        const savedReels = savedReelsRaw?.symbols ? savedReelsRaw : {symbols: null, positions: null};
+        const stickyWildsInit = userGameState[`${GAME_NAME}StickyWilds`] || [];
+
+        for (let i = 0; i < 5; i++) {
+            const symbols = savedReels.symbols?.[i] || (gameConfig.reel_strips[`reelStrip${i+1}`] || []).slice(0,3);
+            const position = savedReels.positions?.[i] || 0;
+            responseObject[`rs.i0.r.i${i}.syms`] = symbols.join('%2C');
+            responseObject[`rs.i0.r.i${i}.pos`] = position.toString();
+            let overlayIdx = 0;
+            stickyWildsInit.filter((sw: any) => sw.reel === i).forEach((swPos: any) => {
+                responseObject[`rs.i0.r.i${i}.overlay.i${overlayIdx}.with`] = WILD_SYMBOL_CFTBL;
+                responseObject[`rs.i0.r.i${i}.overlay.i${overlayIdx}.row`] = swPos.row.toString();
+                overlayIdx++;
+            });
+        }
+        responseObject["rs.i0.id"] = `freespinlevel${Math.floor(currentMonsterHealthInit / 3)}`;
+
+
+    } else if (activeRespin) {
+        responseObject.restore = "true";
+        responseObject.gamestate_current = "basicrespin";
+        responseObject.nextaction = "respin"; responseObject.gameover = "false";
+        const savedReelsRaw = userGameState[`${GAME_NAME}Reels`];
+        const savedReels = savedReelsRaw?.symbols ? savedReelsRaw : {symbols: null, positions: null};
+        const stickyWildsInit = userGameState[`${GAME_NAME}StickyWilds`] || [];
+         for (let i = 0; i < 5; i++) {
+            const symbols = savedReels.symbols?.[i] || (gameConfig.reel_strips[`reelStrip${i+1}`] || []).slice(0,3);
+            const position = savedReels.positions?.[i] || 0;
+            responseObject[`rs.i0.r.i${i}.syms`] = symbols.join('%2C');
+            responseObject[`rs.i0.r.i${i}.pos`] = position.toString();
+            let overlayIdx = 0;
+            stickyWildsInit.filter((sw: any) => sw.reel === i).forEach((swPos: any) => {
+                responseObject[`rs.i0.r.i${i}.overlay.i${overlayIdx}.with`] = WILD_SYMBOL_CFTBL;
+                responseObject[`rs.i0.r.i${i}.overlay.i${overlayIdx}.row`] = swPos.row.toString();
+                overlayIdx++;
+            });
+        }
+        responseObject["rs.i0.id"] = "basicrespin";
+
+
+    } else {
+        responseObject.restore = "false";
+        responseObject.gamestate_current = "basic";
+        responseObject.nextaction = "spin";
+        responseObject.gameover = "true";
+        for (let i = 0; i < 5; i++) {
+            const reelStripKey = `reelStrip${i + 1}`;
+            const strip = gameConfig.reel_strips[reelStripKey] || ['SYM_0', 'SYM_0', 'SYM_0'];
+            const pos = Math.floor(Math.random() * Math.max(1, strip.length - 2));
+            const syms = [strip[pos] || 'SYM_0', strip[pos + 1] || 'SYM_0', strip[pos + 2] || 'SYM_0'];
+            responseObject[`rs.i0.r.i${i}.syms`] = syms.join('%2C');
+            responseObject[`rs.i0.r.i${i}.pos`] = pos.toString();
+        }
+        responseObject["rs.i0.id"] = "basic";
+    }
+
+    responseObject._message = "Init action substantially refined with static params, better fresh reels, and full state restoration logic.";
+    // TODO: Log this init event if game analytics require it.
+    // LogService.logGameSpin({ userId, gameId: gameConfig.id, gameName: GAME_NAME, responseData: JSON.stringify(responseObject), betAmount: 0, winAmount: 0, userBalanceAfterSpin: user.balance ?? 0 });
 
     return c.json(responseObject);
 
@@ -595,18 +446,141 @@ const handleInit = async (c: Context) => {
 };
 
 const handleSpin = async (c: Context) => {
-  const userId = c.get('user')?.sub;
-  const betLevel = c.req.query('bet_betlevel');
-  const denomination = c.req.query('bet_denomination');
-  console.log(`[${gameName}] Spin action called for user ${userId}`);
-  console.log(`[${gameName}] BetLevel: ${betLevel}, Denomination: ${denomination}, All Query Params:`, c.req.query());
-  // TODO: Implement spin logic: place bet, update balance, determine win, log spin.
-  return c.json({
-    message: 'Spin action processed',
-    userId,
-    query: c.req.query(),
-    data: { /* Placeholder for actual spin response structure from PHP */ }
-  });
+  const jwtPayload = c.get('user');
+  const userIdString = jwtPayload?.sub;
+  if (!userIdString) return c.json({ error: 'User ID not found in token' }, 401);
+  const userId = parseInt(userIdString, 10);
+  if (isNaN(userId)) return c.json({ error: 'Invalid user ID format' }, 400);
+
+  const queryParams = c.req.query();
+  const betDenominationCent = parseInt(queryParams['bet_denomination'] || '0');
+  const betLevel = parseInt(queryParams['bet_betlevel'] || '1');
+  const denom = betDenominationCent / 100;
+  const lines = PAYLINES.length; // Fixed lines for this game
+  const totalBetAmountCurrency = denom * betLevel * lines;
+
+  console.log(`[${GAME_NAME}] Spin: user ${userId}, denom ${denom}, level ${betLevel}, totalBet ${totalBetAmountCurrency}`);
+
+  try {
+    let user = await UserService.getUserById(userId);
+    const gameConfig = await GameConfigService.getGameConfigByName(GAME_NAME);
+    if (!user || !gameConfig) return c.json({ error: 'User or game config not found' }, 500);
+
+    if ((user.balance ?? 0) < totalBetAmountCurrency) {
+      return c.json({ error: 'Insufficient balance', event: 'error', type: 'spin', serverResponse: 'invalid balance' }, 400);
+    }
+
+    const balanceUpdateArgs: UpdateUserBalanceArgs = { userId, amount: -totalBetAmountCurrency, transactionType: 'spin_bet', systemName: GAME_NAME };
+    const updatedUser = await UserService.updateUserBalance(balanceUpdateArgs);
+    if (!updatedUser) return c.json({ error: 'Failed to update balance for bet' }, 500);
+    user = updatedUser;
+
+    const shopId = user.shop_id;
+    const gameBankType = gameConfig.gamebank || 'slots';
+    const betContributionRate = parseFloat(gameConfig.settings?.bet_contribution_rate_slots || '0.9'); // Example: 90% default
+    let amountToBank = 0;
+    if (shopId && totalBetAmountCurrency > 0) {
+      amountToBank = totalBetAmountCurrency * betContributionRate;
+      await BankService.updateBank(shopId, gameBankType, amountToBank);
+    }
+
+    let userGameState = await UserGameStateService.getUserGameState(userId, gameConfig.id);
+    // Save current bet config for potential FS trigger or respins
+    userGameState[`${GAME_NAME}Denom`] = denom;
+    userGameState[`${GAME_NAME}BetLevel`] = betLevel;
+    // Persist these immediately in case spin triggers a feature that needs them
+    await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}Denom`, denom);
+    await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}BetLevel`, betLevel);
+
+
+    const spinResult = await _performSpinLogic(userId, gameConfig, userGameState, betLevel, denom, false, false);
+
+    let finalUser = user;
+    if (spinResult.totalWinCoins > 0) {
+        const totalWinCurrency = spinResult.totalWinCoins * denom;
+        const winUpdateArgs: UpdateUserBalanceArgs = { userId, amount: totalWinCurrency, transactionType: 'spin_win', systemName: GAME_NAME };
+        const userAfterWin = await UserService.updateUserBalance(winUpdateArgs);
+        if (userAfterWin) finalUser = userAfterWin;
+    }
+
+    for (const key in spinResult.userGameStateChanges) {
+        await UserGameStateService.updateUserGameState(userId, gameConfig.id, key, spinResult.userGameStateChanges[key]);
+    }
+    userGameState = await UserGameStateService.getUserGameState(userId, gameConfig.id); // Refresh after all updates
+
+    // Construct Spin Response
+    const responseObject = {
+        clientaction: "spin",
+        credit: Math.round((finalUser.balance ?? 0) * 100),
+        gameover: spinResult.gameIsOver.toString(),
+        nextaction: spinResult.nextAction,
+        gamestate_current: spinResult.nextAction === 'respin' ? 'basicrespin' : (spinResult.nextAction === 'freespin' ? `freespinlevel${spinResult.featureStageResult}` : 'basic'),
+        bet_denomination: denom * 100, bet_betlevel: betLevel, bet_lines: lines,
+        "rs.i0.id": spinResult.nextAction === 'respin' ? 'basicrespin' : (spinResult.nextAction === 'freespin' ? `freespinlevel${spinResult.featureStageResult}` : 'basic'),
+        ...(() => {
+            const reelData: Record<string, string> = {};
+            for (let r = 0; r < 5; r++) {
+                reelData[`rs.i0.r.i${r}.syms`] = spinResult.generatedReelsForResponse.symbols[r].join('%2C');
+                reelData[`rs.i0.r.i${r}.pos`] = spinResult.generatedReelsForResponse.positions[r].toString();
+            }
+            return reelData;
+        })(),
+        ...(() => {
+            const overlayData: Record<string, string> = {}; let i = 0;
+            spinResult.currentStickyWildsResult.forEach(sw => {
+                overlayData[`rs.i0.r.${sw.reel}.overlay.i${i}.with`] = sw.symbol;
+                overlayData[`rs.i0.r.${sw.reel}.overlay.i${i}.row`] = sw.row.toString();
+                overlayData[`rs.i0.r.${sw.reel}.overlay.i${i}.pos`] = spinResult.generatedReelsForResponse.positions[sw.reel].toString(); // Use reel stop pos for overlay pos
+                i++;
+            });
+            return overlayData;
+        })(),
+        ...(spinResult.totalWinCoins > 0 ? {
+            ...spinResult.lineWinsArray.reduce((acc, lw, idx) => {
+                acc[`ws.i${idx}.reelset`] = "basic"; // Or gamestate_current if it reflects reelset ID
+                acc[`ws.i${idx}.types.i0.coins`] = lw.winCoins.toString();
+                acc[`ws.i${idx}.types.i0.cents`] = Math.round(lw.winCoins * denom * 100).toString();
+                lw.positions.forEach((p: {col: number, row: number}, pIdx: number) => { acc[`ws.i${idx}.pos.i${pIdx}`] = `${p.col}%2C${p.row}`; });
+                acc[`ws.i${idx}.betline`] = lw.lineIndex.toString();
+                acc[`ws.i${idx}.sym`] = lw.symbol;
+                acc[`ws.i${idx}.direction`] = "left_to_right";
+                acc[`ws.i${idx}.numsymbols`] = lw.numSymbols.toString();
+                return acc;
+            }, {} as Record<string, string>),
+        } : {}),
+        game_win_cents: Math.round(spinResult.totalWinCoins * denom * 100),
+        game_win_coins: spinResult.totalWinCoins,
+        totalwin_cents: Math.round(spinResult.totalWinCoins * denom * 100),
+        totalwin_coins: spinResult.totalWinCoins,
+        wavecount: spinResult.monsterHealthResult, collectablesWon: spinResult.monsterHealthResult, feature_stage: `stage${spinResult.featureStageResult}`,
+        ...(spinResult.freeSpinsAwardedThisSpinResult > 0 ? {
+            freespins_initial: spinResult.freeSpinsAwardedThisSpinResult,
+            freespins_total: spinResult.freeSpinsAwardedThisSpinResult,
+            freespins_left: spinResult.freeSpinsAwardedThisSpinResult,
+            freespins_multiplier: 1,
+            freespins_totalwin_coins:0, freespins_totalwin_cents:0,
+        } : {}),
+         roundid: `round-${Date.now()}`, actionid: `action-${Date.now()}`,
+         multiplier: "1", nearwinallowed: "false", // Common static fields
+         _message: "Spin action refined response.",
+    };
+
+    const profitFromBet = totalBetAmountCurrency - (spinResult.totalWinCoins * denom) - amountToBank;
+    const spinLogData: Partial<GameSpinLogData> = {
+        userId, gameId: gameConfig.id, gameName: GAME_NAME, shopId: user.shop_id ?? undefined,
+        responseData: JSON.stringify(responseObject), betAmount: totalBetAmountCurrency, winAmount: spinResult.totalWinCoins * denom,
+        ipAddress: c.req.header('x-forwarded-for') || c.req.header('remote-addr'),
+        userBalanceAfterSpin: finalUser.balance ?? 0, denomination: denom,
+        toGameBanks: amountToBank,
+        betProfit: profitFromBet,
+    };
+    await LogService.logGameSpin(spinLogData as GameSpinLogData);
+    return c.json(responseObject);
+
+  } catch (error: any) {
+    console.error(`[${GAME_NAME}] Error in handleSpin:`, error);
+    return c.json({ error: 'Internal server error', details: error.message }, 500);
+  }
 };
 
 const handleFreeSpin = async (c: Context) => {
@@ -616,45 +590,107 @@ const handleFreeSpin = async (c: Context) => {
   const userId = parseInt(userIdString, 10);
   if (isNaN(userId)) return c.json({ error: 'Invalid user ID format' }, 400);
 
-  console.log(`[${gameName}] FreeSpin action called for user ${userId}`);
-  console.log(`[${gameName}] All Query Params:`, c.req.query());
+  console.log(`[${GAME_NAME}] FreeSpin action called for user ${userId}`);
 
   try {
-    const user = await UserService.getUserById(userId);
+    let user = await UserService.getUserById(userId);
     const gameConfig = await GameConfigService.getGameConfigByName(GAME_NAME);
     if (!user || !gameConfig) return c.json({ error: 'User or game config not found' }, 500);
 
     let userGameState = await UserGameStateService.getUserGameState(userId, gameConfig.id);
 
     const currentFreeGamesTotal = userGameState[`${GAME_NAME}FreeGames`] ?? 0;
-    let currentFreeGameNumber = userGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0;
+    let currentFreeGameNum = userGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0;
 
-    if (currentFreeGameNumber >= currentFreeGamesTotal) {
-      // Should not happen if client behaves, or free spins ended.
-      // Clear states and return to base game or an error.
-      await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}FreeGames`, 0);
-      await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}CurrentFreeGame`, 0);
-      await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}StickyWilds`, []);
-      await UserGameStateService.updateUserGameState(userId, gameConfig.id, `${GAME_NAME}MonsterHealth`, 0);
+    if (!(userGameState[`${GAME_NAME}FreeSpinsActive`]) || currentFreeGameNum >= currentFreeGamesTotal) {
+      const changes: Record<string,any> = {
+        [`${GAME_NAME}FreeGames`]:0, [`${GAME_NAME}CurrentFreeGame`]:0, [`${GAME_NAME}StickyWilds`]:[],
+        [`${GAME_NAME}MonsterHealth`]:0, [`${GAME_NAME}FreeSpinsActive`]: false, [`${GAME_NAME}Level3FSAwarded`]: false
+      };
+      for(const key in changes) await UserGameStateService.updateUserGameState(userId, gameConfig.id, key, changes[key]);
       return c.json({ error: 'No free spins left or invalid state.', nextaction: 'spin', gameover: 'true' });
     }
 
-    // currentFreeGameNumber is 0-indexed for userGameState but 1-indexed for logic/display usually
-    // If CurrentFreeGame stored 0 for the 1st spin, then it's fine. If it stored 1, then it's fine.
-    // Assuming CurrentFreeGame in UGS means "next spin to play" (1-indexed for user) or "spins played" (0-indexed for user)
-    // The _performSpinLogic will increment it conceptually for its processing, then we save it.
-    // Let's assume userGameState.CurrentFreeGame stores the number of FS played (0 before first).
-    // The _performSpinLogic will handle the current spin as userGameState.CurrentFreeGame + 1 conceptually.
+    const denom = userGameState[`${GAME_NAME}DenomForFS`] ?? userGameState[`${GAME_NAME}Denom`] ?? (gameConfig.settings?.Denominations?.[0] ?? gameConfig.denomination ?? 0.01);
+    const betLevel = userGameState[`${GAME_NAME}BetLevelForFS`] ?? userGameState[`${GAME_NAME}BetLevel`] ?? (gameConfig.settings?.bet_levels?.[0] ?? 1);
 
-    const denom = userGameState[`${GAME_NAME}Denom`] ?? (gameConfig.settings?.Denominations?.[0] ?? gameConfig.denomination ?? 0.01);
-    const betLevel = userGameState[`${GAME_NAME}BetLevel`] ?? (gameConfig.settings?.bet_levels?.[0] ?? 1);
+    const spinResult = await _performSpinLogic(userId, gameConfig, userGameState, betLevel, denom, true, false);
 
-    // Call shared spin logic with isFreeSpin = true
-    // _performSpinLogic will internally handle incrementing CurrentFreeGame conceptually for this spin
-    // and other free spin specific logic like monster health.
-    // It will return the new state of sticky wilds, monster health, etc.
-    // The userGameState object is passed and can be modified by _performSpinLogic for some parts.
-    return _performSpinLogic(c, userId, user, gameConfig, userGameState, betLevel, denom, true, false);
+    let finalUser = user;
+    if (spinResult.totalWinCoins > 0) {
+        const totalWinCurrency = spinResult.totalWinCoins * denom;
+        const winUpdateArgs: UpdateUserBalanceArgs = { userId, amount: totalWinCurrency, transactionType: 'freespin_win', systemName: GAME_NAME+"_FS" };
+        const userAfterWin = await UserService.updateUserBalance(winUpdateArgs);
+        if (userAfterWin) finalUser = userAfterWin;
+    }
+
+    for (const key in spinResult.userGameStateChanges) {
+        await UserGameStateService.updateUserGameState(userId, gameConfig.id, key, spinResult.userGameStateChanges[key]);
+    }
+    userGameState = await UserGameStateService.getUserGameState(userId, gameConfig.id); // Refresh after all updates
+
+    const responseObject = {
+        clientaction: "freespin",
+        credit: Math.round((finalUser.balance ?? 0) * 100),
+        gameover: spinResult.gameIsOver.toString(),
+        nextaction: spinResult.nextAction,
+        gamestate_current: `freespinlevel${spinResult.featureStageResult}`,
+        "rs.i0.id": `freespinlevel${spinResult.featureStageResult}`, // Reelset ID for free spins
+        bet_denomination: denom * 100, bet_betlevel: betLevel, bet_lines: PAYLINES.length,
+         ...(() => {
+            const reelData: Record<string, string> = {};
+            for (let r = 0; r < 5; r++) {
+                reelData[`rs.i0.r.i${r}.syms`] = spinResult.generatedReelsForResponse.symbols[r].join('%2C');
+                reelData[`rs.i0.r.i${r}.pos`] = spinResult.generatedReelsForResponse.positions[r].toString();
+            }
+            return reelData;
+        })(),
+        ...(() => {
+            const overlayData: Record<string, string> = {}; let i = 0;
+            spinResult.currentStickyWildsResult.forEach(sw => {
+                overlayData[`rs.i0.r.${sw.reel}.overlay.i${i}.with`] = sw.symbol;
+                overlayData[`rs.i0.r.${sw.reel}.overlay.i${i}.row`] = sw.row.toString();
+                overlayData[`rs.i0.r.${sw.reel}.overlay.i${i}.pos`] = spinResult.generatedReelsForResponse.positions[sw.reel].toString();
+                i++;
+            });
+            return overlayData;
+        })(),
+        ...(spinResult.totalWinCoins > 0 ? {
+            ...spinResult.lineWinsArray.reduce((acc, lw, idx) => {
+                acc[`ws.i${idx}.reelset`] = `freespinlevel${spinResult.featureStageResult}`;
+                acc[`ws.i${idx}.types.i0.coins`] = lw.winCoins.toString();
+                acc[`ws.i${idx}.types.i0.cents`] = Math.round(lw.winCoins * denom * 100).toString();
+                lw.positions.forEach((p: {reel: number, row: number}, pIdx: number) => { acc[`ws.i${idx}.pos.i${pIdx}`] = `${p.reel}%2C${p.row}`; });
+                acc[`ws.i${idx}.betline`] = lw.lineId.toString();
+                acc[`ws.i${idx}.sym`] = lw.symbol;
+                acc[`ws.i${idx}.direction`] = "left_to_right";
+                acc[`ws.i${idx}.numsymbols`] = lw.count.toString();
+                return acc;
+            }, {} as Record<string, string>),
+        } : {}),
+        game_win_cents: Math.round(spinResult.totalWinCoins * denom * 100),
+        game_win_coins: spinResult.totalWinCoins,
+        totalwin_cents: Math.round(spinResult.bonusWinCoinsResult * denom * 100), // In FS, totalwin is accumulated bonus win
+        totalwin_coins: spinResult.bonusWinCoinsResult,
+        freespins_initial: spinResult.freeSpinsTotalResult,
+        freespins_total: spinResult.freeSpinsTotalResult,
+        freespins_left: spinResult.freeSpinsLeftResult,
+        freespins_multiplier: 1,
+        freespins_totalwin_coins: spinResult.bonusWinCoinsResult,
+        freespins_totalwin_cents: Math.round(spinResult.bonusWinCoinsResult * denom * 100),
+        collectablesWon: spinResult.monsterHealthResult, wavecount: spinResult.monsterHealthResult, feature_stage: `stage${spinResult.featureStageResult}`,
+        roundid: `round-${Date.now()}`, actionid: `action-${Date.now()}`,
+         _message: "FreeSpin action refined response.",
+    };
+
+    const spinLogData: Partial<GameSpinLogData> = {
+        userId, gameId: gameConfig.id, gameName: GAME_NAME, shopId: user.shop_id ?? undefined,
+        responseData: JSON.stringify(responseObject), betAmount: 0, winAmount: spinResult.totalWinCoins * denom,
+        ipAddress: c.req.header('x-forwarded-for') || c.req.header('remote-addr'),
+        userBalanceAfterSpin: finalUser.balance ?? 0, denomination: denom,
+    };
+    await LogService.logGameSpin(spinLogData as GameSpinLogData);
+    return c.json(responseObject);
 
   } catch (error: any) {
     console.error(`[${GAME_NAME}] Error in handleFreeSpin:`, error);
@@ -669,26 +705,93 @@ const handleRespin = async (c: Context) => {
   const userId = parseInt(userIdString, 10);
   if (isNaN(userId)) return c.json({ error: 'Invalid user ID format' }, 400);
 
-  console.log(`[${gameName}] Respin action called for user ${userId}`);
-  console.log(`[${gameName}] All Query Params:`, c.req.query());
+  console.log(`[${GAME_NAME}] Respin action called for user ${userId}`);
 
   try {
-    const user = await UserService.getUserById(userId);
+    let user = await UserService.getUserById(userId);
     const gameConfig = await GameConfigService.getGameConfigByName(GAME_NAME);
     if (!user || !gameConfig) return c.json({ error: 'User or game config not found' }, 500);
 
     let userGameState = await UserGameStateService.getUserGameState(userId, gameConfig.id);
 
-    if (!(userGameState[`${GAME_NAME}IsRespinActive`]) || !userGameState[`${GAME_NAME}StickyWilds`]?.length) {
+    if (!(userGameState[`${GAME_NAME}IsRespinActive`]) || !(userGameState[`${GAME_NAME}StickyWilds`]?.length > 0)) {
+        const changes: Record<string,any> = { [`${GAME_NAME}IsRespinActive`]:false, [`${GAME_NAME}StickyWilds`]:[] };
+        for(const key in changes) await UserGameStateService.updateUserGameState(userId, gameConfig.id, key, changes[key]);
         return c.json({ error: 'No active respin state found.', nextaction: 'spin', gameover: 'true' });
     }
 
-    const denom = userGameState[`${GAME_NAME}DenomForRespin`] ?? userGameState[`${GAME_NAME}Denom`] ?? (gameConfig.settings?.Denominations?.[0] ?? gameConfig.denomination ?? 0.01);
-    const betLevel = userGameState[`${GAME_NAME}BetLevelForRespin`] ?? userGameState[`${GAME_NAME}BetLevel`] ?? (gameConfig.settings?.bet_levels?.[0] ?? 1);
+    const denom = userGameState[`${GAME_NAME}DenomForRespin`] ?? (gameConfig.settings?.Denominations?.[0] ?? gameConfig.denomination ?? 0.01);
+    const betLevel = userGameState[`${GAME_NAME}BetLevelForRespin`] ?? (gameConfig.settings?.bet_levels?.[0] ?? 1);
 
-    // Respins are free, use original bet settings.
-    // _performSpinLogic will handle sticky wilds from userGameState.
-    return _performSpinLogic(c, userId, user, gameConfig, userGameState, betLevel, denom, false, true);
+    const spinResult = await _performSpinLogic(userId, gameConfig, userGameState, betLevel, denom, false, true);
+
+    let finalUser = user;
+    if (spinResult.totalWinCoins > 0) {
+        const totalWinCurrency = spinResult.totalWinCoins * denom;
+        const winUpdateArgs: UpdateUserBalanceArgs = { userId, amount: totalWinCurrency, transactionType: 'respin_win', systemName: GAME_NAME+"_RS" };
+        const userAfterWin = await UserService.updateUserBalance(winUpdateArgs);
+        if (userAfterWin) finalUser = userAfterWin;
+    }
+
+    for (const key in spinResult.userGameStateChanges) {
+        await UserGameStateService.updateUserGameState(userId, gameConfig.id, key, spinResult.userGameStateChanges[key]);
+    }
+     userGameState = await UserGameStateService.getUserGameState(userId, gameConfig.id); // Refresh
+
+    const responseObject = {
+        clientaction: "respin",
+        credit: Math.round((finalUser.balance ?? 0) * 100),
+        gameover: spinResult.gameIsOver.toString(),
+        nextaction: spinResult.nextAction,
+        gamestate_current: spinResult.nextAction === 'respin' ? "basicrespin" : "basic",
+        "rs.i0.id": spinResult.nextAction === 'respin' ? "basicrespin" : "basic",
+         ...(() => {
+            const reelData: Record<string, string> = {};
+            for (let r = 0; r < 5; r++) {
+                reelData[`rs.i0.r.i${r}.syms`] = spinResult.generatedReelsForResponse.symbols[r].join('%2C');
+                reelData[`rs.i0.r.i${r}.pos`] = spinResult.generatedReelsForResponse.positions[r].toString();
+            }
+            return reelData;
+        })(),
+        ...(() => {
+            const overlayData: Record<string, string> = {}; let i = 0;
+            spinResult.currentStickyWildsResult.forEach(sw => {
+                overlayData[`rs.i0.r.${sw.reel}.overlay.i${i}.with`] = sw.symbol;
+                overlayData[`rs.i0.r.${sw.reel}.overlay.i${i}.row`] = sw.row.toString();
+                overlayData[`rs.i0.r.${sw.reel}.overlay.i${i}.pos`] = spinResult.generatedReelsForResponse.positions[sw.reel].toString();
+                i++;
+            });
+            return overlayData;
+        })(),
+         ...(spinResult.totalWinCoins > 0 ? {
+            ...spinResult.lineWinsArray.reduce((acc, lw, idx) => {
+                acc[`ws.i${idx}.reelset`] = "basicrespin";
+                acc[`ws.i${idx}.types.i0.coins`] = lw.winCoins.toString();
+                acc[`ws.i${idx}.types.i0.cents`] = Math.round(lw.winCoins * denom * 100).toString();
+                lw.positions.forEach((p: {reel: number, row: number}, pIdx: number) => { acc[`ws.i${idx}.pos.i${pIdx}`] = `${p.reel}%2C${p.row}`; });
+                acc[`ws.i${idx}.betline`] = lw.lineId.toString();
+                acc[`ws.i${idx}.sym`] = lw.symbol;
+                acc[`ws.i${idx}.direction`] = "left_to_right";
+                acc[`ws.i${idx}.numsymbols`] = lw.count.toString();
+                return acc;
+            }, {} as Record<string, string>),
+        } : {}),
+        game_win_cents: Math.round(spinResult.totalWinCoins * denom * 100),
+        game_win_coins: spinResult.totalWinCoins,
+        totalwin_cents: Math.round(spinResult.totalWinCoins * denom * 100), // Respins are part of the same bet round
+        totalwin_coins: spinResult.totalWinCoins,
+        roundid: `round-${Date.now()}`, actionid: `action-${Date.now()}`,
+         _message: "Respin action refined response.",
+    };
+
+    const spinLogData: Partial<GameSpinLogData> = {
+        userId, gameId: gameConfig.id, gameName: GAME_NAME, shopId: user.shop_id ?? undefined,
+        responseData: JSON.stringify(responseObject), betAmount: 0, winAmount: spinResult.totalWinCoins * denom, // Respins are free
+        ipAddress: c.req.header('x-forwarded-for') || c.req.header('remote-addr'),
+        userBalanceAfterSpin: finalUser.balance ?? 0, denomination: denom,
+    };
+    await LogService.logGameSpin(spinLogData as GameSpinLogData);
+    return c.json(responseObject);
 
   } catch (error: any) {
     console.error(`[${GAME_NAME}] Error in handleRespin:`, error);

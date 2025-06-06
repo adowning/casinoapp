@@ -8,14 +8,14 @@ import { UserService } from '../../services/UserService';
 import { GameConfigService, FullGameConfig } from '../../services/GameConfigService';
 import { UserGameStateService } from '../../services/UserGameStateService';
 // import { BankService } from '../../services/BankService';
-import { LogService, GameSpinLogData } from '../../services/LogService'; // Added GameSpinLogData
-import { User } from '@prisma/client'; // Import User type for explicit typing
+import { LogService, GameSpinLogData } from '../../services/LogService';
+import { User } from '@prisma/client'; // Explicit User type
 
 const GAME_NAME = 'AfricanKingNG';
 
 // Paylines for AfricanKingNG (20 lines)
 // This should ideally come from gameConfig.settings.paylines_definition or similar.
-const PAYLINES_AFRICANKING: number[][] = [
+const PAYLINES_AFRICANKING_RAW: number[][] = [ // Renamed to RAW to avoid confusion if transformation is needed
     [1,1,1,1,1], [0,0,0,0,0], [2,2,2,2,2], [0,1,2,1,0], [2,1,0,1,2], // 1-5
     [0,0,1,2,2], [2,2,1,0,0], [1,0,0,0,1], [1,2,2,2,1], [1,0,1,2,1], // 6-10
     [1,2,1,0,1], [0,1,1,1,0], [2,1,1,1,2], [1,1,0,1,1], [1,1,2,1,1], // 11-15
@@ -25,34 +25,45 @@ const PAYLINES_AFRICANKING: number[][] = [
 const WILD_SYMBOL_AK = 'SYM_0'; // Lion
 const SCATTER_SYMBOL_AK = 'SYM_9'; // Tree/Landscape Scatter
 
+// Helper function to convert all numeric leaf values in an object to strings
+function convertNumbersToStringsRecursive(obj: any) {
+    for (const key in obj) {
+        if (typeof obj[key] === 'number') {
+            obj[key] = obj[key].toString();
+        } else if (typeof obj[key] === 'object' && obj[key] !== null) {
+            convertNumbersToStringsRecursive(obj[key]);
+        }
+    }
+}
+
 
 // --- Shared Spin Logic ---
 async function _performAfricanKingSpin(
     userId: number,
-    user: User, // Pass the fetched user object
+    user: User,
     gameConfig: FullGameConfig,
     currentUserGameState: Record<string, any>,
-    betCoin: number, // Actual coin value (denomination)
-    betMultiplier: number, // Bet per line (coins)
+    betCoin: number,
+    betMultiplier: number,
     isFreeSpin: boolean
 ): Promise<{
-    generatedReels: { symbols: string[][], positions: number[] };
+    generatedReels: { symbols: string[][], positions: number[] }; // Symbols are string IDs
     totalWinCoins: number;
     lineWinsArray: any[];
     scatterCount: number;
-    nextState: string; // "Ready", "PickBonus", "FreeSpins"
-    userGameStateChanges: Record<string, any>; // To store changes to be applied by caller
-    bonusSymbol?: string | null; // Symbol chosen for expansion in FS
+    nextState: string;
+    userGameStateChanges: Record<string, any>;
+    bonusSymbol: string | null;
     expansionDidOccur: boolean;
     expandedSymbolId: string | null;
     expandedWinCoins: number;
 }> {
-    const lines = PAYLINES_AFRICANKING.length;
+    const lines = PAYLINES_AFRICANKING_RAW.length;
     const betPerLineCoins = betMultiplier;
 
     const userGameStateChanges: Record<string, any> = {};
 
-    // Reel Generation (Simplified for now)
+    // Reel Generation
     const generatedReels: { symbols: string[][], positions: number[] } = { symbols: [], positions: [] };
     for (let i = 0; i < 5; i++) { // 5 reels
         const reelStripKey = isFreeSpin && gameConfig.reel_strips[`reelStripBonus${i + 1}`]
@@ -75,10 +86,10 @@ async function _performAfricanKingSpin(
     }
 
     // --- Expanding Symbol Logic (AfricanKingNG specific for Free Spins) ---
-    const activeBonusSymbol = currentUserGameState[`${GAME_NAME}BonusSymbol`] as string | null; // Renamed for clarity
-    let reelsAfterExpansion = JSON.parse(JSON.stringify(generatedReels.symbols));
-    let expansionDidOccurThisSpin = false; // Renamed for clarity
-    let winFromExpansionCoins = 0; // Renamed for clarity
+    const activeBonusSymbol = currentUserGameState[`${GAME_NAME}BonusSymbol`] as string | null;
+    let reelsAfterExpansion = JSON.parse(JSON.stringify(generatedReels.symbols)); // Start with initial reels
+    let expansionDidOccurThisSpin = false;
+    let winFromExpansionCoins = 0;
     let actualExpandingSymbolId: string | null = null;
 
 
@@ -151,19 +162,20 @@ async function _performAfricanKingSpin(
             );
 
             if (paytableEntryForExpansion && paytableEntryForExpansion.payout_multiplier > 0) {
+                // Expanding symbol win: PaytableMultiplier * BetPerLine * NumberOfActiveLines
                 winFromExpansionCoins = (Number(paytableEntryForExpansion.payout_multiplier) || 0) * betPerLineCoins * lines;
             }
         }
 
         if (expansionDidOccurThisSpin) {
-            generatedReels.symbols = reelsAfterExpansion;
+            generatedReels.symbols = reelsAfterExpansion; // Reels for response now show expanded state
         }
     }
 
     const totalWinCoins = initialTotalWinCoins + winFromExpansionCoins;
     const finalLineWinsArray = [...initialLineWinsArray];
-    // TODO: If expanded wins should be detailed in lineWinsArray or a separate response field.
-    // For now, they are summed into totalWinCoins. The client might need to know the expandedWinCoins separately.
+    // Note: If expanded wins need to be detailed separately in lineWinsArray for client,
+    // that logic would go here. For now, it's part of totalWinCoins.
 
 
     // --- Scatter Handling & State Transitions ---
@@ -220,9 +232,9 @@ async function _performAfricanKingSpin(
         scatterCount,
         nextState,
         userGameStateChanges,
-        bonusSymbol: activeBonusSymbol,
+        bonusSymbol: activeBonusSymbol, // This is the symbol chosen to be expanding
         expansionDidOccur: expansionDidOccurThisSpin,
-        expandedSymbolId: expansionDidOccurThisSpin ? actualExpandingSymbolId : null,
+        expandedSymbolId: expansionDidOccurThisSpin ? actualExpandingSymbolId : null, // Same as activeBonusSymbol if expansion happened
         expandedWinCoins: winFromExpansionCoins,
     };
 }
@@ -320,16 +332,30 @@ app.get('/', async (c) => { // WebSocket upgrade typically happens on a GET requ
                     snivy: "hono-server v0.1 (API vX.Y)", // Server version info
                     supportedFeatures: ["Jackpots"], // Example
                     sessionId: `sess_${socket.data.userId}_${Date.now()}`,
-                    defaultLines: gameConfig.settings?.defaultLines || PAYLINES_AFRICANKING.map((_,i)=>i.toString()), // Assuming PAYLINES_AFRICANKING is defined
-                    bets: bets.map(String),
-                    betMultiplier: gameConfig.settings?.betMultiplier || "1.0",
+                    defaultLines: PAYLINES_AFRICANKING_RAW.map((_,i)=>i.toString()), // Array of line indices as strings
+                    bets: bets.map(String), // Array of bet multipliers as strings
+                    betMultiplier: (gameConfig.settings?.betMultiplier || "1.0").toString(),
                     defaultBet: String(defaultBet),
                     defaultCoinValue: String(defaultDenom),
-                    coinValues: denominations.map(String),
-                    gameParameters: { /* TODO: Populate with structured paylines, paytable, RTP info from gameConfig */ },
-                    // initialSymbols: [ [...] ], // Usually sent with spin response or specific initGame command
-                    jackpotsEnabled: "true", // Based on gameConfig.jackpots relation or settings
-                    gameModes: "[]", // Example: "normal,autoplay,tournament"
+                    coinValues: denominations.map(String), // Array of coin values as strings
+                    gameParameters: {
+                        availableLines: PAYLINES_AFRICANKING_RAW.map(line => line.map((row, reel) => `${reel},${row}`)), // e.g., [["0,1","1,1",...],...]
+                        payouts: gameConfig.paytable.map(p => ({
+                            payout: p.payout_multiplier.toString(),
+                            symbols: [p.symbol, p.symbol], // NG format often shows [symbol, symbol] for basic, or more for complex
+                            type: p.symbol === SCATTER_SYMBOL_AK ? "scatter" : "basic", // Distinguish scatter payouts
+                            count: p.match_count.toString(), // Add match count
+                        })),
+                        rtp: (gameConfig.settings?.rtpPercentage || "96.00").toString(),
+                    },
+                    initialSymbols: gameConfig.reel_strips.reelStrip1 ? // Generate a default 5x3 grid
+                        [0,1,2].map(rowIndex =>
+                            [0,1,2,3,4].map(reelIndex =>
+                                gameConfig.reel_strips[`reelStrip${reelIndex + 1}`]?.[rowIndex] || 'SYM_X' // Fallback symbol
+                            )
+                        ) : [],
+                    jackpotsEnabled: "true",
+                    gameModes: "[]",
                     balance: { entries: "0.00", totalAmount: (user.balance ?? 0).toFixed(2), currency: user.currency || 'EUR' },
                     userId: socket.data.userId.toString(),
                 }
@@ -424,27 +450,45 @@ app.get('/', async (c) => { // WebSocket upgrade typically happens on a GET requ
             const responseData = {
                 spinResult: {
                     type: isFreeSpinRequest ? "FreeSpinResult" : "SpinResult",
-                    rows: spinResult.generatedReels.symbols.map(reel => reel.map(symbolId => ({id: symbolId})))
+                    rows: spinResult.generatedReels.symbols // NG expects array of arrays of symbol strings
                 },
                 slotWin: spinResult.totalWinCoins > 0 ? {
-                    totalWin: spinResult.totalWinCoins,
-                    lineWinAmounts: spinResult.lineWinsArray,
+                    totalWin: spinResult.totalWinCoins.toString(), // String
+                    lineWinAmounts: spinResult.lineWinsArray.map(lw => ({
+                        type: "LineWinAmount",
+                        selectedLine: lw.selectedLine.toString(),
+                        amount: lw.amount.toString(),
+                        wonSymbols: lw.wonSymbols.map((pos: {reel:number, row:number}) => [pos.reel.toString(), pos.row.toString()])
+                    })),
+                    // If expandedWinCoins is part of totalWin and not detailed separately in lineWinsArray for NG:
+                    ...(spinResult.expansionDidOccur && spinResult.expandedWinCoins > 0 && !isFreeSpinRequest ? { // Add expansion win detail if needed
+                        expandedWin: { // Example structure, needs PHP verification
+                            symbol: spinResult.expandedSymbolId,
+                            amount: spinResult.expandedWinCoins.toString()
+                        }
+                    } : {})
                 } : null,
                 state: spinResult.nextState,
-                balance: { entries: "0.00", totalAmount: finalUserBalance.toFixed(2), currency: user.currency || 'EUR' },
+                balance: { entries: "0.00", totalAmount: finalUserBalance.toFixed(2), currency: user.currency || 'EUR' }, // Balance should be string
                 nextState: spinResult.nextState,
                 ...(isFreeSpinRequest || spinResult.nextState === "FreeSpins" || userGameState[`${GAME_NAME}FreeSpinsActive`] ? {
-                    freeSpinRemain: Math.max(0, (userGameState[`${GAME_NAME}FreeSpinsTotal`] ?? 0) - (userGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0)),
-                    freeSpinsTotal: userGameState[`${GAME_NAME}FreeSpinsTotal`] ?? 0,
-                    totalBonusWin: userGameState[`${GAME_NAME}TotalFreeSpinWin`] ?? 0,
+                    freeSpinRemain: (Math.max(0, (userGameState[`${GAME_NAME}FreeSpinsTotal`] ?? 0) - (userGameState[`${GAME_NAME}CurrentFreeGame`] ?? 0))).toString(),
+                    freeSpinsTotal: (userGameState[`${GAME_NAME}FreeSpinsTotal`] ?? 0).toString(),
+                    totalBonusWin: (userGameState[`${GAME_NAME}TotalFreeSpinWin`] ?? 0).toString(),
                     expandingSymbols: (isFreeSpinRequest && spinResult.expansionDidOccur && spinResult.expandedSymbolId) ? [spinResult.expandedSymbolId] : [],
-                    expandedWinAmountCoins: spinResult.expandedWinCoins, // Send explicit expanded win amount
+                    // expandedWinAmountCoins is now part of totalWinCoins in _performAfricanKingSpin
                 } : {}),
                 ...(spinResult.nextState === "PickBonus" ? {
                     bonusType: "PickBonus",
-                    picksLeft: userGameState[`${GAME_NAME}Picks`] ?? 0,
+                    picksLeft: (userGameState[`${GAME_NAME}Picks`] ?? 0).toString(),
+                    // PHP response for SpinRequest triggering PickBonus might include initial items for pick bonus here
+                    // e.g., items: Array(25).fill(null).map((_,idx)=>({index:idx.toString(), value:"0", picked:"false"}))
                 } : {}),
             };
+
+            convertNumbersToStringsRecursive(responseData.balance); // Ensure balance fields are strings
+            if (responseData.slotWin) convertNumbersToStringsRecursive(responseData.slotWin);
+
             socket.send(JSON.stringify({ action: responseAction, result: true, sesId: sessionIdentifier, data: responseData }));
 
             // Log the spin
