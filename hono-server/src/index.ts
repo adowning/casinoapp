@@ -7,7 +7,9 @@ dotenv.config();
 
 import { authMiddleware } from './middleware/authMiddleware';
 import authRoutes from './routes/authRoutes';
-import narcosNetApp from './routes/narcosNetRoute'; // Preserve existing game route
+import narcosNetApp from './routes/narcosNetRoute'; // Existing game route
+import creatureFromTheBlackLagoonNETRoute from './routes/games/creatureFromTheBlackLagoonNETRoute';
+import africanKingNGSocketRoute from './routes/games/africanKingNGSocketRoute'; // New WebSocket route
 
 const app = new Hono();
 
@@ -34,7 +36,38 @@ app.get('/protected', authMiddleware, (c) => {
 // Mount the existing NarcosNET game route
 // This could also be protected if needed by adding authMiddleware as an argument
 // For now, assuming it manages its own session or is public/needs different auth
-app.route('/games/NarcosNET', narcosNetApp);
+app.route('/games/NarcosNET', narcosNetApp); // This remains as is for now, outside /api
+
+// --- New /api/games router with authentication ---
+const gamesApi = new Hono();
+
+// Apply authMiddleware to all routes under /api/games/*
+gamesApi.use('*', authMiddleware);
+
+// Mount specific game routes under /api/games
+gamesApi.route('/CreatureFromTheBlackLagoonNET', creatureFromTheBlackLagoonNETRoute);
+// Example for another game:
+// import africanKingNGRoute from './routes/games/africanKingNGRoute';
+// gamesApi.route('/AfricanKingNG', africanKingNGRoute);
+
+// Mount the games API sub-router to the main application
+app.route('/api/games', gamesApi);
+// --- End of /api/games router ---
+
+
+// --- WebSocket Communications Router ---
+// All WebSocket upgrade requests will be authenticated by authMiddleware
+const websocketApi = new Hono();
+websocketApi.use('*', authMiddleware); // Protect all WebSocket upgrade GET requests
+
+// Mount WebSocket route for AfricanKingNG
+// Path will be /ws/AfricanKingNG
+websocketApi.route('/AfricanKingNG', africanKingNGSocketRoute);
+
+// Mount the WebSocket API sub-router to the main application
+app.route('/ws', websocketApi);
+// --- End of WebSocket Communications Router ---
+
 
 // Server setup for Bun
 const port = parseInt(process.env.PORT || '3000');
