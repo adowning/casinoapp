@@ -1,0 +1,305 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma" // Corrected output path
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// Approximated existing models
+model User {
+  id             Int       @id @default(autoincrement())
+  username       String?   @unique // Assuming a username field
+  balance        Float     @default(0)
+  shop_id        Int?
+  session        String?   @db.Text // For old serialized data, will be replaced by UserGameState
+  status         String? // e.g., UserStatus enum
+  is_blocked     Boolean   @default(false)
+  count_balance  Float?    @default(0) // From SlotSettings
+  address        String? // From SlotSettings, purpose unclear, probably not IP
+  remember_token String?   @db.Text
+  last_bid       DateTime? @updatedAt
+  created_at     DateTime  @default(now())
+  updated_at     DateTime  @updatedAt
+
+  currency           String?
+  total_in           Float     @default(0)
+  total_out          Float     @default(0)
+  count_tournaments  Float     @default(0)
+  count_happyhours   Float     @default(0)
+  count_refunds      Float     @default(0)
+  count_progress     Float     @default(0)
+  count_daily_entries Float    @default(0)
+  count_invite       Float     @default(0)
+  tournaments        Float     @default(0)
+  happyhours         Float     @default(0)
+  refunds            Float     @default(0)
+  progress           Float     @default(0)
+  daily_entries      Float     @default(0)
+  invite             Float     @default(0)
+  welcomebonus       Float     @default(0)
+  count_welcomebonus Float     @default(0)
+  smsbonus           Float     @default(0)
+  count_smsbonus     Float     @default(0)
+  wheelfortune       Float     @default(0)
+  count_wheelfortune Float     @default(0)
+  rating             Int       @default(0)
+  avatar             String?
+  language           String?
+  phone              String?
+  phone_verified     Boolean   @default(false)
+  sms_token          String?
+  sms_token_date     DateTime?
+  inviter_id         Int?
+  parent_id          Int?
+  auth_token         String?   @unique
+  last_login         DateTime?
+  last_online        DateTime?
+  last_daily_entry   DateTime?
+  last_progress      DateTime?
+  last_wheelfortune  DateTime?
+  shop_limit         Float     @default(0)
+  google2fa_secret   String?
+  google2fa_enable   Boolean   @default(false)
+  agreed             Boolean   @default(false)
+  free_demo          Boolean   @default(false)
+  role_id            Int?
+
+  shop             Shop?           @relation(fields: [shop_id], references: [id])
+  inviter          User?           @relation("UserReferrals", fields: [inviter_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  referrals        User[]          @relation("UserReferrals")
+  parent           User?           @relation("UserHierarchy", fields: [parent_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children         User[]          @relation("UserHierarchy")
+  game_logs        GameLog[]
+  stat_games       StatGame[]
+  user_game_states UserGameState[]
+  jackpots         JPG[] // If a user can own/win a jackpot directly
+
+  @@map("users") // Assuming table name is 'users'
+}
+
+model Shop {
+  id         Int      @id @default(autoincrement())
+  name       String? // Assuming a name field
+  percent    Float?   @default(0)
+  is_blocked Boolean  @default(false)
+  currency   String?  @default("USD")
+  max_win    Float?   @default(0)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  users      User[]
+  games      Game[]
+  game_banks GameBank[]
+  fish_banks FishBank[]
+  jpgs       JPG[]
+  game_logs  GameLog[]
+  stat_games StatGame[]
+
+  @@map("shops") // Assuming table name is 'shops'
+}
+
+model Game {
+  id            Int     @id @default(autoincrement())
+  name          String  @unique // Game's unique identifier (e.g., AfricanKingNG)
+  title         String? // Display title
+  shop_id       Int?
+  denomination  Float   @default(1)
+  bet           String? // Comma-separated bet values
+  view          Boolean @default(true)
+  advanced      String? @db.Text // For old serialized static game data
+  stat_in       Float?  @default(0)
+  stat_out      Float?  @default(0)
+  slotViewState String?
+  bids          Int?    @default(0)
+  rezerv        Float?  @default(0) // WinGamble in SlotSettings
+  cask          Float?  @default(0)
+  gamebank      String?
+  label         String?
+  device        Int     @default(0) // 0 for web, 1 for mobile
+  scaleMode     String? // e.g. 'showAll', 'exactFit'
+  category_temp String?
+  original_id   Int?
+
+  jp_1_percent  Float?  @default(0)
+  jp_2_percent  Float?  @default(0)
+  jp_3_percent  Float?  @default(0)
+  jp_4_percent  Float?  @default(0)
+  jp_5_percent  Float?  @default(0)
+  jp_6_percent  Float?  @default(0)
+  jp_7_percent  Float?  @default(0)
+  jp_8_percent  Float?  @default(0)
+  jp_9_percent  Float?  @default(0)
+  jp_10_percent Float?  @default(0)
+
+  chanceFirepot1 String?
+  chanceFirepot2 String?
+  chanceFirepot3 String?
+  fireCount1     String?
+  fireCount2     String?
+  fireCount3     String?
+  // Fields for lines_percent_config might be JSON if stored directly in GameSetting
+  // game_win fields (winlineX, winbonusX) might be JSON in GameSetting
+
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  shop                  Shop?               @relation(fields: [shop_id], references: [id])
+  game_logs             GameLog[]
+  stat_games            StatGame[]          @relation("StatGameToGame") // Corrected relation
+  game_reel_strips      GameReelStrip[]
+  game_paytable_entries GamePaytableEntry[]
+  game_settings         GameSetting[]
+  user_game_states      UserGameState[]
+  jackpots              JPG[] // If games are directly associated with specific jackpots
+
+  @@map("games") // Assuming table name is 'games'
+}
+
+model GameBank {
+  id         Int      @id @default(autoincrement())
+  shop_id    Int      @unique // Assuming one gamebank record per shop
+  slots      Float?   @default(0)
+  bonus      Float?   @default(0)
+  table_bank Float?   @default(0)
+  little     Float?   @default(0)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  shop Shop? @relation(fields: [shop_id], references: [id])
+
+  @@map("game_banks")
+}
+
+model FishBank {
+  id         Int      @id @default(autoincrement())
+  shop_id    Int      @unique // Assuming one fishbank record per shop
+  fish       Float?   @default(0)
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
+
+  shop Shop? @relation(fields: [shop_id], references: [id])
+
+  @@map("fish_banks")
+}
+
+model JPG {
+  id            Int      @id @default(autoincrement())
+  shop_id       Int?
+  game_id       Int? // If jackpot is specific to a game
+  name          String?
+  balance       Float?   @default(0)
+  percent       Float?   @default(0) // Contribution percent
+  user_id       Int? // If a user can "own" or trigger it
+  pay_sum       Float?   @default(0) // Amount to pay out when won
+  start_balance Float?   @default(0)
+  created_at    DateTime @default(now())
+  updated_at    DateTime @updatedAt
+
+  shop Shop? @relation(fields: [shop_id], references: [id])
+  game Game? @relation(fields: [game_id], references: [id])
+  user User? @relation(fields: [user_id], references: [id])
+
+  @@map("jpgs")
+}
+
+model GameLog {
+  id         Int      @id @default(autoincrement())
+  game_id    Int?
+  user_id    Int?
+  ip         String?
+  str        String?  @db.Text // Stores the JSON log string
+  shop_id    Int?
+  created_at DateTime @default(now())
+
+  game Game? @relation(fields: [game_id], references: [id])
+  user User? @relation(fields: [user_id], references: [id])
+  shop Shop? @relation(fields: [shop_id], references: [id])
+
+  @@map("game_logs")
+}
+
+model StatGame {
+  id           Int      @id @default(autoincrement())
+  user_id      Int?
+  balance      Float?
+  bet          Float?
+  win          Float?
+  game         String? // Game name string as in PHP
+  in_game      Float? // toGameBanks
+  in_jpg       Float? // toSlotJackBanks
+  in_profit    Float? // betProfit
+  denomination Float?
+  shop_id      Int?
+  slots_bank   Float?
+  bonus_bank   Float?
+  fish_bank    Float?
+  table_bank   Float?
+  little_bank  Float?
+  total_bank   Float?
+  date_time    DateTime @default(now()) // Changed from created_at for clarity from PHP
+
+  user         User?   @relation(fields: [user_id], references: [id])
+  game_ref     Game?   @relation("StatGameToGame", fields: [game_name_fk], references: [name]) // Assuming game name is unique
+  game_name_fk String? // Foreign key to Game.name
+  shop         Shop?   @relation(fields: [shop_id], references: [id])
+
+  @@map("stat_game")
+}
+
+// New Models for game configuration and state
+
+model GameReelStrip {
+  id         Int    @id @default(autoincrement())
+  game_id    Int
+  strip_name String // e.g., 'reelStrip1', 'reelStripBonus1'
+  symbols    Json // Storing symbols as a JSON array e.g. ["3","8","6"]
+
+  game Game @relation(fields: [game_id], references: [id])
+
+  @@unique([game_id, strip_name]) // Ensure strip names are unique per game
+  @@map("game_reel_strips")
+}
+
+model GamePaytableEntry {
+  id                Int    @id @default(autoincrement())
+  game_id           Int
+  symbol            String // e.g., 'SYM_3', 'SCATTER'
+  match_count       Int // e.g., 3, 4, 5 (number of matching symbols)
+  payout_multiplier Float // Payout multiplier for the bet
+
+  game Game @relation(fields: [game_id], references: [id])
+
+  @@map("game_paytable_entries")
+}
+
+model GameSetting {
+  id            Int    @id @default(autoincrement())
+  game_id       Int
+  setting_name  String // e.g., 'slotFreeCount', 'slotWildMpl', 'lines', 'denominations'
+  setting_value Json // Value of the setting, stored as JSON
+
+  game Game @relation(fields: [game_id], references: [id])
+
+  @@unique([game_id, setting_name])
+  @@map("game_settings")
+}
+
+model UserGameState {
+  id          Int    @id @default(autoincrement())
+  user_id     Int
+  game_id     Int
+  state_key   String // e.g., 'FreeGames', 'CurrentFreeGame', 'BonusWin', 'CreatureFromTheBlackLagoonNETDenom'
+  state_value Json // Value of the state, stored as JSON
+
+  user User @relation(fields: [user_id], references: [id])
+  game Game @relation(fields: [game_id], references: [id])
+
+  @@unique([user_id, game_id, state_key])
+  @@map("user_game_states")
+}
